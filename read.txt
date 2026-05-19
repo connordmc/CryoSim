@@ -1,0 +1,16 @@
+# 1. Scaffold
+mkdir cryo-thermal-sim && cd cryo-thermal-sim
+
+# 2. Place every file above into the matching path
+
+# 3. Install
+npm install
+
+# 4. Run locally
+npm run dev
+
+# 5. Build for GitHub Pages
+npm run build          # output in dist/
+
+# 6. Deploy to GitHub Pages (using gh-pages or manual)
+# Push the contents of dist/ to the gh-pages branch.

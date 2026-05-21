@@ -1,10 +1,14 @@
+// src/App.tsx
+// Complete refactored main application state container and orchestration
+
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import type { SolverConfig, Plate, WireConfig } from './types';
+import type { SolverConfig, Plate, WireConfig, StepResult } from './types';
 import { ThermalSolver } from './core/solver';
 import TelemetryBar from './components/TelemetryBar';
 import ConfigPanel from './components/ConfigPanel';
 import SimulationPlot from './components/SimulationPlot';
 import SystemMap from './components/SystemMap';
+import OptimizationPanel from './components/OptimizationPanel';
 
 const WIRE_COLORS = [
   '#00ffd5', '#ff6b6b', '#feca57', '#48dbfb', '#ff9ff3',
@@ -19,11 +23,48 @@ const DEFAULT_CONFIG: SolverConfig = {
 };
 
 const DEFAULT_PLATES: Plate[] = [
-  { id: 0, nodeIndex: 0,  temperature: 4.0,   isFixed: true, maxPower: 0 },
-  { id: 1, nodeIndex: 43, temperature: 4.0,   isFixed: true, maxPower: 0 },
-  { id: 2, nodeIndex: 63, temperature: 4.0,   isFixed: true, maxPower: 0 },
-  { id: 3, nodeIndex: 81, temperature: 77.0,  isFixed: true, maxPower: 0 },
-  { id: 4, nodeIndex: 99, temperature: 300.0, isFixed: true, maxPower: 0 },
+  {
+    id: 0,
+    nodeIndex: 0,
+    temperature: 0.010,
+    plateType: 'dynamic',
+    coolingCapacityWatts: 0.000015,
+    heatCapacityJK: 0.005,
+  },
+  {
+    id: 1,
+    nodeIndex: 25,
+    temperature: 0.100,
+    plateType: 'dynamic',
+    coolingCapacityWatts: 0.0002,
+    heatCapacityJK: 0.05,
+  },
+  {
+    id: 2,
+    nodeIndex: 43,
+    temperature: 0.800,
+    plateType: 'dynamic',
+    coolingCapacityWatts: 0.005,
+    heatCapacityJK: 0.5,
+  },
+  {
+    id: 3,
+    nodeIndex: 63,
+    temperature: 4.0,
+    plateType: 'fixed',
+  },
+  {
+    id: 4,
+    nodeIndex: 81,
+    temperature: 77.0,
+    plateType: 'fixed',
+  },
+  {
+    id: 5,
+    nodeIndex: 99,
+    temperature: 300.0,
+    plateType: 'fixed',
+  },
 ];
 
 const DEFAULT_WIRES: WireConfig[] = [
@@ -51,9 +92,12 @@ const DEFAULT_WIRES: WireConfig[] = [
   },
 ];
 
+type WorkspaceTab = 'simulation' | 'optimization';
+
 const STEPS_PER_FRAME = 10;
 
 export default function App() {
+  // Core state
   const [config, setConfig] = useState<SolverConfig>(DEFAULT_CONFIG);
   const [plates, setPlates] = useState<Plate[]>(DEFAULT_PLATES);
   const [wires, setWires] = useState<WireConfig[]>(DEFAULT_WIRES);
@@ -65,20 +109,36 @@ export default function App() {
   const [hoveredNode, setHoveredNode] = useState<number | null>(null);
   const [selectedWireId, setSelectedWireId] = useState<number | null>(0);
 
+  // New state for three-state plate system
+  const [plateTemperatures, setPlateTemperatures] = useState<Map<number, number>>(new Map());
+  const [dtReduced, setDtReduced] = useState(false);
+  const [lastMaxDeltaT, setLastMaxDeltaT] = useState(0);
+
+  // Workspace tab
+  const [workspace, setWorkspace] = useState<WorkspaceTab>('simulation');
+
+  // Refs
   const solverRef = useRef<ThermalSolver | null>(null);
   const simRef = useRef({ step: 0, time: 0 });
   const configRef = useRef(config);
   configRef.current = config;
 
+  /* ===========================================================
+     BUILD SOLVER
+     Reconstructs the solver whenever config/plates/wires change
+     =========================================================== */
   const buildSolver = useCallback(() => {
     try {
       const s = new ThermalSolver(config, plates, wires);
       solverRef.current = s;
       simRef.current = { step: 0, time: 0 };
       setWireTemps(s.getAllTemperatures());
+      setPlateTemperatures(s.getPlateTemperatures());
       setStepCount(0);
       setSimTime(0);
       setError(null);
+      setDtReduced(false);
+      setLastMaxDeltaT(0);
       if (wires.length > 0 && selectedWireId === null) {
         setSelectedWireId(wires[0].id);
       }
@@ -90,6 +150,11 @@ export default function App() {
 
   useEffect(buildSolver, [buildSolver]);
 
+  /* ===========================================================
+     SIMULATION LOOP
+     Uses requestAnimationFrame for smooth real-time updates.
+     Integrates adaptive dt feedback from solver.
+     =========================================================== */
   useEffect(() => {
     if (!isRunning) return;
     let id: number;
@@ -108,15 +173,25 @@ export default function App() {
       }
 
       try {
+        let lastResult: StepResult | null = null;
+
         for (let i = 0; i < STEPS_PER_FRAME; i++) {
-          solver.step(cfg.dt, powerFn, simRef.current.time);
+          lastResult = solver.step(cfg.dt, powerFn, simRef.current.time);
           simRef.current.step++;
-          simRef.current.time += cfg.dt;
+          simRef.current.time += lastResult.actualDt;
         }
+
         setWireTemps(solver.getAllTemperatures());
+        setPlateTemperatures(solver.getPlateTemperatures());
         setStepCount(simRef.current.step);
         setSimTime(simRef.current.time);
         setError(null);
+
+        // Update adaptive dt indicators
+        if (lastResult) {
+          setDtReduced(lastResult.dtWasReduced);
+          setLastMaxDeltaT(lastResult.maxDeltaT);
+        }
       } catch (e: any) {
         setIsRunning(false);
         setError(e.message || String(e));
@@ -128,6 +203,9 @@ export default function App() {
     return () => cancelAnimationFrame(id);
   }, [isRunning]);
 
+  /* ===========================================================
+     CONTROL HANDLERS
+     =========================================================== */
   const handleToggle = () => setIsRunning((r) => !r);
 
   const handleReset = () => {
@@ -139,18 +217,23 @@ export default function App() {
     const solver = solverRef.current;
     const cfg = configRef.current;
     if (!solver) return;
+
     let powerFn: ((t: number) => number) | null = null;
     try {
       powerFn = new Function('t', cfg.powerFormula) as (t: number) => number;
       powerFn(0);
     } catch { powerFn = null; }
+
     try {
-      solver.step(cfg.dt, powerFn, simRef.current.time);
+      const result = solver.step(cfg.dt, powerFn, simRef.current.time);
       simRef.current.step++;
-      simRef.current.time += cfg.dt;
+      simRef.current.time += result.actualDt;
       setWireTemps(solver.getAllTemperatures());
+      setPlateTemperatures(solver.getPlateTemperatures());
       setStepCount(simRef.current.step);
       setSimTime(simRef.current.time);
+      setDtReduced(result.dtWasReduced);
+      setLastMaxDeltaT(result.maxDeltaT);
       setError(null);
     } catch (e: any) {
       setError(e.message || String(e));
@@ -184,13 +267,26 @@ export default function App() {
     URL.revokeObjectURL(url);
   };
 
+  /* ===========================================================
+     DERIVED STATE
+     =========================================================== */
   const solver = solverRef.current;
   const { minT, maxT } = solver
     ? solver.getGlobalMinMax()
     : { minT: 0, maxT: 0 };
 
+  // Build error string with dt warning
+  let displayError = error;
+  if (!displayError && dtReduced) {
+    displayError = `Adaptive dt active (max \u0394T=${lastMaxDeltaT.toFixed(2)}K). Step size reduced for stability.`;
+  }
+
+  /* ===========================================================
+     RENDER
+     =========================================================== */
   return (
     <div className="flex flex-col h-screen bg-[#060a10] text-gray-100 font-mono">
+      {/* Telemetry Bar */}
       <TelemetryBar
         isRunning={isRunning}
         stepCount={stepCount}
@@ -198,19 +294,70 @@ export default function App() {
         maxT={maxT}
         minT={minT}
         numWires={wires.length}
-        error={error}
+        error={displayError}
         onToggle={handleToggle}
         onReset={handleReset}
         onStep={handleStep}
         onExport={handleExport}
       />
 
+      {/* Workspace Tab Selector */}
+      <div className="flex-none flex items-center gap-1 px-3 py-1 bg-[#0a0e14] border-b border-[#21262d]">
+        <button
+          onClick={() => setWorkspace('simulation')}
+          className={`px-3 py-1 text-[10px] uppercase tracking-widest rounded transition-colors ${
+            workspace === 'simulation'
+              ? 'bg-[#161b22] text-cyan-400 border border-cyan-500/30'
+              : 'text-gray-500 hover:text-gray-300 border border-transparent'
+          }`}
+        >
+          Simulation
+        </button>
+        <button
+          onClick={() => setWorkspace('optimization')}
+          className={`px-3 py-1 text-[10px] uppercase tracking-widest rounded transition-colors ${
+            workspace === 'optimization'
+              ? 'bg-[#161b22] text-cyan-400 border border-cyan-500/30'
+              : 'text-gray-500 hover:text-gray-300 border border-transparent'
+          }`}
+        >
+          Optimization
+        </button>
+
+        {/* Adaptive dt indicator */}
+        {dtReduced && (
+          <div className="ml-auto flex items-center gap-1.5">
+            <span className="w-2 h-2 rounded-full bg-amber-400 animate-pulse" />
+            <span className="text-[9px] text-amber-400 uppercase tracking-wider">
+              Adaptive dt Active
+            </span>
+          </div>
+        )}
+
+        {/* Dynamic plate live readouts */}
+        {plates.filter((p) => p.plateType === 'dynamic').length > 0 && (
+          <div className="ml-4 flex items-center gap-2">
+            {plates.filter((p) => p.plateType === 'dynamic').map((p) => {
+              const liveT = plateTemperatures.get(p.id);
+              return (
+                <span key={p.id} className="text-[9px] text-emerald-400 font-mono">
+                  P{p.id}:{liveT !== undefined ? liveT.toFixed(4) : '---'}K
+                </span>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Main Content Area */}
       <div className="flex flex-1 overflow-hidden">
+        {/* Config Panel (always visible) */}
         <ConfigPanel
           config={config}
           plates={plates}
           wires={wires}
           selectedWireId={selectedWireId}
+          plateTemperatures={plateTemperatures}
           onConfigChange={setConfig}
           onPlatesChange={setPlates}
           onWiresChange={setWires}
@@ -218,26 +365,37 @@ export default function App() {
           wireColors={WIRE_COLORS}
         />
 
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <SimulationPlot
-            solver={solver}
-            wireTemps={wireTemps}
-            wires={wires}
-            dx={config.dx}
-            numNodes={config.numNodes}
-            hoveredNode={hoveredNode}
-            selectedWireId={selectedWireId}
-            onHover={setHoveredNode}
-            onSelectWire={setSelectedWireId}
-          />
-          <SystemMap
-            wires={wires}
+        {/* Workspace Content */}
+        {workspace === 'simulation' && (
+          <div className="flex-1 flex flex-col overflow-hidden">
+            <SimulationPlot
+              solver={solver}
+              wireTemps={wireTemps}
+              wires={wires}
+              dx={config.dx}
+              numNodes={config.numNodes}
+              hoveredNode={hoveredNode}
+              selectedWireId={selectedWireId}
+              onHover={setHoveredNode}
+              onSelectWire={setSelectedWireId}
+            />
+            <SystemMap
+              wires={wires}
+              plates={plates}
+              numNodes={config.numNodes}
+              hoveredNode={hoveredNode}
+              selectedWireId={selectedWireId}
+            />
+          </div>
+        )}
+
+        {workspace === 'optimization' && (
+          <OptimizationPanel
+            config={config}
             plates={plates}
-            numNodes={config.numNodes}
-            hoveredNode={hoveredNode}
-            selectedWireId={selectedWireId}
+            wires={wires}
           />
-        </div>
+        )}
       </div>
     </div>
   );

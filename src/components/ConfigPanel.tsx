@@ -1,12 +1,16 @@
+// src/components/ConfigPanel.tsx
+// Complete refactored configuration panel with three-state plate boundary selector
+
 import React, { useState } from 'react';
 import { Plus, Trash2, Copy } from 'lucide-react';
-import type { Plate, MaterialSegment, SolverConfig, MaterialType, WireConfig } from '../types';
+import type { Plate, PlateType, MaterialSegment, SolverConfig, MaterialType, WireConfig } from '../types';
 
 interface Props {
   config: SolverConfig;
   plates: Plate[];
   wires: WireConfig[];
   selectedWireId: number | null;
+  plateTemperatures: Map<number, number>;
   onConfigChange: (c: SolverConfig) => void;
   onPlatesChange: (p: Plate[]) => void;
   onWiresChange: (w: WireConfig[]) => void;
@@ -18,9 +22,11 @@ const TABS = ['Plates', 'Wires', 'Physics'] as const;
 const inp =
   'w-full bg-[#161b22] border border-[#21262d] rounded px-2 py-1 text-xs text-cyan-300 font-mono focus:border-cyan-500/50 focus:outline-none focus:ring-1 focus:ring-cyan-500/20';
 const lbl = 'text-[10px] uppercase tracking-wider text-gray-500 mb-0.5';
+const selectCls =
+  'w-full bg-[#161b22] border border-[#21262d] rounded px-2 py-1 text-xs text-cyan-300 font-mono focus:border-cyan-500/50 focus:outline-none';
 
 const ConfigPanel: React.FC<Props> = ({
-  config, plates, wires, selectedWireId,
+  config, plates, wires, selectedWireId, plateTemperatures,
   onConfigChange, onPlatesChange, onWiresChange, onSelectWire, wireColors,
 }) => {
   const [tab, setTab] = useState<number>(0);
@@ -30,12 +36,26 @@ const ConfigPanel: React.FC<Props> = ({
     const id = plates.length > 0 ? Math.max(...plates.map((p) => p.id)) + 1 : 0;
     onPlatesChange([
       ...plates,
-      { id, nodeIndex: Math.floor(config.numNodes / 2), temperature: 10, isFixed: true, maxPower: 0 },
+      {
+        id,
+        nodeIndex: Math.floor(config.numNodes / 2),
+        temperature: 10,
+        plateType: 'fixed',
+        coolingCapacityWatts: 0.001,
+        heatCapacityJK: 1.0,
+        resistanceOhms: 0,
+      },
     ]);
   };
+
   const removePlate = (id: number) => onPlatesChange(plates.filter((p) => p.id !== id));
-  const setPlateField = (id: number, k: keyof Plate, v: number | boolean) =>
-    onPlatesChange(plates.map((p) => (p.id === id ? { ...p, [k]: v } : p)));
+
+  const setPlateField = (id: number, key: keyof Plate, value: number | string | boolean) => {
+    onPlatesChange(plates.map((p) => {
+      if (p.id !== id) return p;
+      return { ...p, [key]: value };
+    }));
+  };
 
   // Wire helpers
   const addWire = () => {
@@ -114,7 +134,7 @@ const ConfigPanel: React.FC<Props> = ({
 
   return (
     <div className="w-80 flex-none flex flex-col bg-[#0d1117] border-r border-[#21262d] select-none">
-      {/* tab bar */}
+      {/* Tab bar */}
       <div className="flex border-b border-[#21262d]">
         {TABS.map((t, i) => (
           <button
@@ -135,48 +155,124 @@ const ConfigPanel: React.FC<Props> = ({
         {/* TAB 0: PLATES */}
         {tab === 0 && (
           <>
-            {plates.map((p) => (
-              <div key={p.id} className="bg-[#161b22] border border-[#21262d] rounded p-2 space-y-1.5">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] text-gray-400 font-semibold">PLATE #{p.id}</span>
-                  <button onClick={() => removePlate(p.id)} className="text-gray-600 hover:text-red-400">
-                    <Trash2 size={12} />
-                  </button>
-                </div>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <div className={lbl}>Node Idx</div>
-                    <input
-                      type="number"
-                      className={inp}
-                      value={p.nodeIndex}
-                      min={0}
-                      max={config.numNodes - 1}
-                      onChange={(e) => setPlateField(p.id, 'nodeIndex', parseInt(e.target.value) || 0)}
-                    />
+            {plates.map((p) => {
+              const liveTemp = plateTemperatures.get(p.id);
+              return (
+                <div key={p.id} className="bg-[#161b22] border border-[#21262d] rounded p-2 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] text-gray-400 font-semibold">PLATE #{p.id}</span>
+                    <div className="flex items-center gap-1">
+                      {p.plateType === 'dynamic' && liveTemp !== undefined && (
+                        <span className="text-[9px] text-emerald-400 font-mono">
+                          {liveTemp.toFixed(4)} K
+                        </span>
+                      )}
+                      <button onClick={() => removePlate(p.id)} className="text-gray-600 hover:text-red-400">
+                        <Trash2 size={12} />
+                      </button>
+                    </div>
                   </div>
-                  <div>
-                    <div className={lbl}>Temp (K)</div>
-                    <input
-                      type="number"
-                      className={inp}
-                      value={p.temperature}
-                      step={0.1}
-                      onChange={(e) => setPlateField(p.id, 'temperature', parseFloat(e.target.value) || 0.01)}
-                    />
+
+                  {/* Node index and temperature */}
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <div className={lbl}>Node Idx</div>
+                      <input
+                        type="number"
+                        className={inp}
+                        value={p.nodeIndex}
+                        min={0}
+                        max={config.numNodes - 1}
+                        onChange={(e) => setPlateField(p.id, 'nodeIndex', parseInt(e.target.value) || 0)}
+                      />
+                    </div>
+                    <div>
+                      <div className={lbl}>Init Temp (K)</div>
+                      <input
+                        type="number"
+                        className={inp}
+                        value={p.temperature}
+                        step={0.1}
+                        onChange={(e) => setPlateField(p.id, 'temperature', parseFloat(e.target.value) || 0.01)}
+                      />
+                    </div>
                   </div>
+
+                  {/* Plate type selector */}
+                  <div>
+                    <div className={lbl}>Boundary Type</div>
+                    <select
+                      className={selectCls}
+                      value={p.plateType}
+                      onChange={(e) => setPlateField(p.id, 'plateType', e.target.value as PlateType)}
+                    >
+                      <option value="fixed">Fixed Temperature (Dirichlet)</option>
+                      <option value="dynamic">Dynamic Cooling Plate</option>
+                      <option value="resistor">Lumped Boundary Resistor</option>
+                    </select>
+                  </div>
+
+                  {/* Conditional fields based on plate type */}
+                  {p.plateType === 'fixed' && (
+                    <div className="bg-[#0d1117] border border-[#21262d] rounded p-1.5">
+                      <div className="text-[9px] text-amber-400">
+                        Infinite thermal sink at {p.temperature.toFixed(2)} K
+                      </div>
+                    </div>
+                  )}
+
+                  {p.plateType === 'dynamic' && (
+                    <div className="space-y-1.5 bg-[#0d1117] border border-[#21262d] rounded p-2">
+                      <div className="text-[9px] text-emerald-400 font-semibold">Dynamic Cooling Parameters</div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <div className={lbl}>Q_max (W)</div>
+                          <input
+                            type="number"
+                            className={inp}
+                            value={p.coolingCapacityWatts || 0}
+                            step={0.0001}
+                            onChange={(e) => setPlateField(p.id, 'coolingCapacityWatts', parseFloat(e.target.value) || 0)}
+                          />
+                        </div>
+                        <div>
+                          <div className={lbl}>C_plate (J/K)</div>
+                          <input
+                            type="number"
+                            className={inp}
+                            value={p.heatCapacityJK || 1.0}
+                            step={0.01}
+                            onChange={(e) => setPlateField(p.id, 'heatCapacityJK', parseFloat(e.target.value) || 0.01)}
+                          />
+                        </div>
+                      </div>
+                      <div className="text-[8px] text-gray-600">
+                        Q_fridge = Q_max * tanh(T / 4.2)
+                      </div>
+                    </div>
+                  )}
+
+                  {p.plateType === 'resistor' && (
+                    <div className="space-y-1.5 bg-[#0d1117] border border-[#21262d] rounded p-2">
+                      <div className="text-[9px] text-red-400 font-semibold">Lumped Resistor Parameters</div>
+                      <div>
+                        <div className={lbl}>Resistance (Ohms)</div>
+                        <input
+                          type="number"
+                          className={inp}
+                          value={p.resistanceOhms || 0}
+                          step={0.001}
+                          onChange={(e) => setPlateField(p.id, 'resistanceOhms', parseFloat(e.target.value) || 0)}
+                        />
+                      </div>
+                      <div className="text-[8px] text-gray-600">
+                        Q_joule = I^2 * R (injected into matrix RHS)
+                      </div>
+                    </div>
+                  )}
                 </div>
-                <label className="flex items-center gap-2 cursor-pointer mt-1">
-                  <input
-                    type="checkbox"
-                    checked={p.isFixed}
-                    onChange={(e) => setPlateField(p.id, 'isFixed', e.target.checked)}
-                    className="accent-cyan-500"
-                  />
-                  <span className="text-[10px] text-gray-400">Fixed Temperature</span>
-                </label>
-              </div>
-            ))}
+              );
+            })}
             <button
               onClick={addPlate}
               className="w-full py-1.5 border border-dashed border-[#21262d] rounded text-xs text-gray-500 hover:text-cyan-400 hover:border-cyan-500/40 transition-colors flex items-center justify-center gap-1"
@@ -189,45 +285,25 @@ const ConfigPanel: React.FC<Props> = ({
         {/* TAB 1: WIRES */}
         {tab === 1 && (
           <>
-            <div className="space-y-1.5">
+            <div className="space-y-1">
               {wires.map((w) => (
                 <div
                   key={w.id}
                   onClick={() => onSelectWire(w.id)}
-                  className={`p-2 rounded border cursor-pointer transition-colors ${
+                  className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer transition-colors ${
                     selectedWireId === w.id
-                      ? 'border-cyan-500/60 bg-[#161b22]'
-                      : 'border-[#21262d] bg-[#0d1117] hover:border-[#30363d]'
+                      ? 'bg-[#161b22] border border-cyan-500/30'
+                      : 'hover:bg-[#161b22] border border-transparent'
                   }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <div className="flex items-center gap-2">
-                      <span
-                        className="w-3 h-3 rounded-full inline-block"
-                        style={{ backgroundColor: w.color }}
-                      />
-                      <span className="text-[11px] text-gray-200 font-medium">{w.label}</span>
-                    </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); duplicateWire(w.id); }}
-                        className="text-gray-600 hover:text-cyan-400 p-0.5"
-                        title="Duplicate"
-                      >
-                        <Copy size={11} />
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); removeWire(w.id); }}
-                        className="text-gray-600 hover:text-red-400 p-0.5"
-                        title="Delete"
-                      >
-                        <Trash2 size={11} />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="text-[9px] text-gray-500 mt-0.5">
-                    A={w.crossSectionalArea.toExponential(2)} m² | I={w.currentAmps} A | {w.segments.length} seg
-                  </div>
+                  <span className="w-3 h-3 rounded-full flex-none" style={{ backgroundColor: w.color }} />
+                  <span className="text-xs text-gray-300 flex-1 truncate">{w.label}</span>
+                  <button onClick={(e) => { e.stopPropagation(); duplicateWire(w.id); }} className="text-gray-600 hover:text-cyan-400">
+                    <Copy size={11} />
+                  </button>
+                  <button onClick={(e) => { e.stopPropagation(); removeWire(w.id); }} className="text-gray-600 hover:text-red-400">
+                    <Trash2 size={11} />
+                  </button>
                 </div>
               ))}
             </div>
@@ -275,15 +351,6 @@ const ConfigPanel: React.FC<Props> = ({
                     />
                   </div>
                 </div>
-                <div>
-                  <div className={lbl}>Color</div>
-                  <input
-                    type="color"
-                    className="w-full h-7 rounded border border-[#21262d] bg-transparent cursor-pointer"
-                    value={selectedWire.color}
-                    onChange={(e) => setWireField(selectedWire.id, 'color', e.target.value)}
-                  />
-                </div>
 
                 {/* Segments */}
                 <div className="text-[10px] text-gray-400 font-semibold uppercase tracking-wider mt-3">
@@ -327,7 +394,7 @@ const ConfigPanel: React.FC<Props> = ({
                     <div>
                       <div className={lbl}>Material</div>
                       <select
-                        className={inp}
+                        className={selectCls}
                         value={s.materialType}
                         onChange={(e) => setSegField(s.id, 'materialType', e.target.value)}
                       >
@@ -406,7 +473,9 @@ const ConfigPanel: React.FC<Props> = ({
               <div>2nd-order accurate, unconditionally stable</div>
               <div>Thomas Algorithm (TDMA) tridiagonal solve</div>
               <div>Harmonic-mean k at cell interfaces</div>
-              <div>Ghost-node Neumann BC at x=0</div>
+              <div>Three-state boundaries: Fixed / Dynamic / Resistor</div>
+              <div>Adaptive dt with max-deltaT safety net</div>
+              <div>Inter-wire coupling via shared dynamic plate nodes</div>
             </div>
           </div>
         )}

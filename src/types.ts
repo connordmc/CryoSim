@@ -21,7 +21,8 @@ export interface Plate {
   // Fixed mode: temperature is the Dirichlet value
   // Dynamic mode fields:
   coolingCapacityWatts?: number;   // Q_max for the fridge curve (W)
-  heatCapacityJK?: number;         // C_plate (J/K)
+  // Dynamic mode: C_plate; Resistor mode: lumped joint thermal mass (J/K)
+  heatCapacityJK?: number;
   // Resistor mode fields:
   resistanceOhms?: number;         // Lumped boundary resistance (Ohms)
 }

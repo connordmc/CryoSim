@@ -44,7 +44,7 @@ const solver = new ThermalSolver(config, plates, wireConfigs);
 
 ## Stepping
 
-The `step` function advances the simulation by a given time interval `dt`. It automatically manages substeps if the temperature $\Delta$ exceeds the stability threshold (50K).
+The `step` function advances the simulation by a given time interval `dt`. It automatically subdivides the interval into substeps whenever the per-substep temperature change exceeds the stability threshold (5 K), and reports the diagnostics in the returned `StepResult` (`actualDt` always equals the full integrated `dt`). If the step cannot be stabilized even at the maximum substep refinement, the state is rolled back and an error is thrown.
 
 ```typescript
 const result = solver.step(dt, powerFn, currentTime);
@@ -59,6 +59,7 @@ const steadyStateSolver = ThermalSolver.computeSteadyState(config, plates, wireC
 ```
 
 Key Features
-* **Dynamic Plate Cooling:** Implements $Q_{fridge}(T) = Q_{capacity} tanh(T/4.2)$, modeling the non-linear cooling power of cryogenic systems.
+* **Dynamic Plate Cooling:** Implements $Q_{fridge}(T) = Q_{capacity} tanh(T/4.2)$, modeling the non-linear cooling power of cryogenic systems. Each dynamic plate is clamped as a Dirichlet node during the wire solve (its heat capacity dwarfs a wire cell's) and then integrated as a lumped ODE, $C_{plate} \, dT/dt = Q_{wires} - Q_{fridge}(T)$, with a linearized backward-Euler treatment of the fridge term for unconditional stability.
+* **Lumped Boundary Resistors:** Resistor plates inject $Q = I^2 R$ at their node and contribute their joint's lumped heat capacity (`heatCapacityJK`) to the node's thermal inertia, so the heating transient is physical rather than mesh-dependent.
 * **Per-Node Area Support:** Unlike simplified models, this solver tracks the cross-sectional area per node, allowing for accurate simulation fo wires with varying thicknesses.
 * **Heat Flux Monitoring:** Provides methods to calculate the heat leak at any node or plate, crucial for calculating the heat load on specific cooling stages. 

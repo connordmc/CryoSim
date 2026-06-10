@@ -255,18 +255,30 @@ const ConfigPanel: React.FC<Props> = ({
                   {p.plateType === 'resistor' && (
                     <div className="space-y-1.5 bg-[#0d1117] border border-[#21262d] rounded p-2">
                       <div className="text-[9px] text-red-400 font-semibold">Lumped Resistor Parameters</div>
-                      <div>
-                        <div className={lbl}>Resistance (Ohms)</div>
-                        <input
-                          type="number"
-                          className={inp}
-                          value={p.resistanceOhms || 0}
-                          step={0.001}
-                          onChange={(e) => setPlateField(p.id, 'resistanceOhms', parseFloat(e.target.value) || 0)}
-                        />
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <div className={lbl}>Resistance (Ohms)</div>
+                          <input
+                            type="number"
+                            className={inp}
+                            value={p.resistanceOhms || 0}
+                            step={0.001}
+                            onChange={(e) => setPlateField(p.id, 'resistanceOhms', parseFloat(e.target.value) || 0)}
+                          />
+                        </div>
+                        <div>
+                          <div className={lbl}>C_joint (J/K)</div>
+                          <input
+                            type="number"
+                            className={inp}
+                            value={p.heatCapacityJK ?? 0.01}
+                            step={0.001}
+                            onChange={(e) => setPlateField(p.id, 'heatCapacityJK', parseFloat(e.target.value) || 0.01)}
+                          />
+                        </div>
                       </div>
                       <div className="text-[8px] text-gray-600">
-                        Q_joule = I^2 * R (injected into matrix RHS)
+                        Q_joule = I^2 * R injected at the node; C_joint sets the joint's thermal mass
                       </div>
                     </div>
                   )}

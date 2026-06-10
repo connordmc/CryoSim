@@ -60,7 +60,7 @@ const SystemMap: React.FC<Props> = ({ wires, plates, numNodes, hoveredNode, sele
                 style={{ left: `${(p.nodeIndex / N) * 100}%`, transform: 'translateX(-50%)' }}
               >
                 <div
-                  className={`w-1 flex-1 rounded-sm ${p.isFixed ? 'bg-amber-400' : 'border border-amber-400 bg-transparent'}`}
+                  className={`w-1 flex-1 rounded-sm ${p.plateType === 'fixed' ? 'bg-amber-400' : 'border border-amber-400 bg-transparent'}`}
                 />
                 <span className="text-[6px] text-amber-400/80 leading-none mt-px">{p.temperature.toFixed(0)}K</span>
               </div>

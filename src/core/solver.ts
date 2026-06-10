@@ -9,15 +9,15 @@ import { interpolateTabulated, COPPER, NBTI, type MaterialTable } from '../const
    Smooth tanh-based model:
    Q_fridge(T) = Q_capacity * tanh(T / 4.2)
    =================================================================== */
-function fridgeCoolingPower(T: number, coolingCapacityWatts: number): number {
+function fridgeCoolingPower(T: number, coolingCapacityWatts: number, scaleK: number = 4.2): number {
   if (T <= 0) return 0;
-  return coolingCapacityWatts * Math.tanh(T / 4.2);
+  return coolingCapacityWatts * Math.tanh(T / scaleK);
 }
 
-function fridgeCoolingDerivative(T: number, coolingCapacityWatts: number): number {
+function fridgeCoolingDerivative(T: number, coolingCapacityWatts: number, scaleK: number = 4.2): number {
   if (T <= 0) return 0;
-  const sech = 1.0 / Math.cosh(T / 4.2);
-  return coolingCapacityWatts * sech * sech / 4.2;
+  const sech = 1.0 / Math.cosh(T / scaleK);
+  return coolingCapacityWatts * sech * sech / scaleK;
 }
 
 /* ===================================================================
@@ -225,11 +225,12 @@ export class WireSolverState {
       if (plateType === 'dynamic' && plateConfig) {
         const Qcap = plateConfig.coolingCapacityWatts || 0;
         const Cplate = plateConfig.heatCapacityJK || 1.0;
+        const scaleK = plateConfig.coolingScaleK ?? 4.2;
         const Tn = this.temperatures[i];
 
         // Fridge cooling at current temperature
-        const Qfridge_n = fridgeCoolingPower(Tn, Qcap);
-        const dQfridge_dT = fridgeCoolingDerivative(Tn, Qcap);
+        const Qfridge_n = fridgeCoolingPower(Tn, Qcap, scaleK);
+        const dQfridge_dT = fridgeCoolingDerivative(Tn, Qcap, scaleK);
 
         // Convert cooling power to volumetric rate (W/m^3)
         // The plate acts as a localized heat sink distributed over one cell volume
@@ -237,15 +238,12 @@ export class WireSolverState {
         const coolingVolumetric = Qfridge_n / cellVolume;
         const coolingDerivVolumetric = dQfridge_dT / cellVolume;
 
-        // Linearized implicit treatment:
-        // Cooling term in equation: -Q_fridge(T^{n+1}) / (A*dx)
-        //   ~ -(Qfridge_n + dQfridge_dT * (T^{n+1} - Tn)) / cellVolume
-        // Move the T^{n+1} part to LHS (adds to diagonal)
-        // Keep the constant part on RHS
+        // Linearized implicit treatment (CN theta=0.5):
+        // Cooling term: -Q_fridge(T^{n+1}) / cellVolume
+        //   ~ -(Qfridge_n + dQfridge_dT*(T^{n+1} - Tn)) / cellVolume
+        // The Taylor pair (diagonal + RHS correction) must carry the same 0.5 factor.
         dynamicDiagExtra = 0.5 * coolingDerivVolumetric;
-        dynamicRhsExtra = -coolingVolumetric + coolingDerivVolumetric * Tn;
-        // The 0.5 factor on diagonal is the CN temporal centering
-        // Net effect: stabilizes the cooling sink implicitly
+        dynamicRhsExtra = -coolingVolumetric + 0.5 * coolingDerivVolumetric * Tn;
       }
 
       // -------- CONSTRUCT MATRIX ROW --------
@@ -321,13 +319,10 @@ export class WireSolverState {
     for (let i = 1; i < N; i++) {
       const denom = b[i] - a[i] * cp[i - 1];
       if (Math.abs(denom) < 1e-30) {
-        // Prevent division by zero - use fallback
-        cp[i] = 0;
-        dp[i] = dp[i - 1];
-      } else {
-        cp[i] = c[i] / denom;
-        dp[i] = (d[i] - a[i] * dp[i - 1]) / denom;
+        throw new Error(`Solver error: near-singular pivot in Thomas algorithm at node ${i} (denom=${denom.toExponential(3)})`);
       }
+      cp[i] = c[i] / denom;
+      dp[i] = (d[i] - a[i] * dp[i - 1]) / denom;
     }
 
     // Back substitution
@@ -434,10 +429,18 @@ export class ThermalSolver {
       try { qExt = powerFn(t); } catch { qExt = 0; }
     }
 
-    // Store previous temperatures for delta check
+    // Store previous temperatures for delta check and retry restores
     const prevTemps: Float64Array[] = this.wires.map(
       (w) => new Float64Array(w.temperatures)
     );
+
+    // Snapshot dynamic plate temperatures for faithful retry restores
+    const prevPlateTemps = new Map<number, number>();
+    for (const pr of this.plateRuntimes) {
+      if (pr.plate.plateType === 'dynamic') {
+        prevPlateTemps.set(pr.plate.id, pr.currentTemperature);
+      }
+    }
 
     // Adaptive substep logic
     let actualDt = dt;
@@ -448,16 +451,16 @@ export class ThermalSolver {
     for (let attempt = 0; attempt < ThermalSolver.MAX_SUBSTEPS; attempt++) {
       const subDt = dt / substeps;
 
-      // Reset temperatures to start of this attempt
+      // Reset to pre-step state before each retry
       if (attempt > 0) {
         for (let w = 0; w < this.wires.length; w++) {
           this.wires[w].temperatures.set(prevTemps[w]);
         }
-        // Reset dynamic plate temperatures
+        // Restore plate temperatures from the pre-step snapshot (not from wire 0)
         for (const pr of this.plateRuntimes) {
           if (pr.plate.plateType === 'dynamic') {
-            const nodeIdx = Math.max(0, Math.min(pr.plate.nodeIndex, this.N - 1));
-            pr.currentTemperature = prevTemps[0][nodeIdx];
+            const saved = prevPlateTemps.get(pr.plate.id);
+            if (saved !== undefined) pr.currentTemperature = saved;
           }
         }
       }
@@ -496,10 +499,21 @@ export class ThermalSolver {
       if (maxDelta > ThermalSolver.MAX_DELTA_T_THRESHOLD) {
         substeps *= 4;
         dtWasReduced = true;
-        if (substeps > Math.pow(4, ThermalSolver.MAX_SUBSTEPS)) {
-          // Cannot converge even with maximum reduction
+        // Guard fires when substeps exceeds the max that will ever actually run
+        // (4^(MAX_SUBSTEPS-1) = 256 for MAX_SUBSTEPS=5).
+        if (substeps > Math.pow(4, ThermalSolver.MAX_SUBSTEPS - 1)) {
+          // Cannot converge — roll back to pre-step state
+          for (let w = 0; w < this.wires.length; w++) {
+            this.wires[w].temperatures.set(prevTemps[w]);
+          }
+          for (const pr of this.plateRuntimes) {
+            if (pr.plate.plateType === 'dynamic') {
+              const saved = prevPlateTemps.get(pr.plate.id);
+              if (saved !== undefined) pr.currentTemperature = saved;
+            }
+          }
           this.dtReductionActive = true;
-          actualDt = dt / substeps;
+          actualDt = dt / (substeps / 4); // dt from the last-actually-run attempt
           break;
         }
         continue;
@@ -541,6 +555,7 @@ export class ThermalSolver {
       const nodeIdx = Math.max(0, Math.min(pr.plate.nodeIndex, this.N - 1));
       const Qcap = pr.plate.coolingCapacityWatts || 0;
       const Cplate = pr.plate.heatCapacityJK || 1.0;
+      const scaleK = pr.plate.coolingScaleK ?? 4.2;
 
       // Sum conductive heat flux from ALL wires at this plate node
       let totalQwires = 0;
@@ -549,7 +564,7 @@ export class ThermalSolver {
       }
 
       // Fridge cooling power at current plate temperature
-      const Qfridge = fridgeCoolingPower(pr.currentTemperature, Qcap);
+      const Qfridge = fridgeCoolingPower(pr.currentTemperature, Qcap, scaleK);
 
       // Temperature update
       const deltaT = (totalQwires - Qfridge) * dt / Cplate;

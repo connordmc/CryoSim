@@ -22,6 +22,7 @@ export interface Plate {
   // Dynamic mode fields:
   coolingCapacityWatts?: number;   // Q_max for the fridge curve (W)
   heatCapacityJK?: number;         // C_plate (J/K)
+  coolingScaleK?: number;          // temperature scale for tanh cooling curve (K); defaults to 4.2
   // Resistor mode fields:
   resistanceOhms?: number;         // Lumped boundary resistance (Ohms)
 }

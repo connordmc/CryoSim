@@ -179,7 +179,7 @@ export interface MaterialTable {
 }
 
 const TABLE_N = 500;
-const T_TABLE_MIN = 0.5;
+const T_TABLE_MIN = 0.01; // extended from 0.5 K to cover mK operating range
 const T_TABLE_MAX = 500;
 
 function buildTable(

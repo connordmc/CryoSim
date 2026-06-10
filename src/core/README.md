@@ -52,14 +52,15 @@ const result = solver.step(dt, powerFn, currentTime);
 
 ## Steady State Calculation
 
-For static analysis, use the built-in steady-state solver which iteratues until the solution converges within a specific threshold:
+For static analysis, use the built-in steady-state solver which iterates until the solution converges within a specific threshold:
 
 ```typescript
 const steadyStateSolver = ThermalSolver.computeSteadyState(config, plates, wireConfigs);
 ```
 
 Key Features
+* **Parallel Wire Bundles:** Each wire entry models `wireCount` identical parallel strands (the default configuration runs a pair of 2 identical wires down the fridge). The bundle is solved as one effective channel of area $A_{eff} = n \cdot A_{wire}$ carrying the total current $I$: because every strand sees the same volumetric equation, the tridiagonal coefficients are unchanged, while extensive quantities scale with $n$ — zero-current conduction heat leaks ($A_{eff} \int \kappa(T)\,dT$), Joule dissipation ($I^2 \rho_e / A_{eff}^2$ volumetric, i.e. parallel paths halve the total at fixed $I$), plate heat-flux couplings, and lumped joint mass/resistance ($n C_{joint}$, $R/n$).
 * **Dynamic Plate Cooling:** Implements $Q_{fridge}(T) = Q_{capacity} tanh(T/4.2)$, modeling the non-linear cooling power of cryogenic systems. Each dynamic plate is clamped as a Dirichlet node during the wire solve (its heat capacity dwarfs a wire cell's) and then integrated as a lumped ODE, $C_{plate} \, dT/dt = Q_{wires} - Q_{fridge}(T)$, with a linearized backward-Euler treatment of the fridge term for unconditional stability.
-* **Lumped Boundary Resistors:** Resistor plates inject $Q = I^2 R$ at their node and contribute their joint's lumped heat capacity (`heatCapacityJK`) to the node's thermal inertia, so the heating transient is physical rather than mesh-dependent.
-* **Per-Node Area Support:** Unlike simplified models, this solver tracks the cross-sectional area per node, allowing for accurate simulation fo wires with varying thicknesses.
+* **Lumped Boundary Resistors:** Resistor plates inject $Q = I^2 R / n$ at their node (per-strand joints in parallel) and contribute the joints' lumped heat capacity (`heatCapacityJK` per joint) to the node's thermal inertia, so the heating transient is physical rather than mesh-dependent.
+* **Per-Wire Geometry:** Cross-sectional area is tracked per wire entry (per strand, with `wireCount` strands per bundle), allowing mixed wire gauges across the harness.
 * **Heat Flux Monitoring:** Provides methods to calculate the heat leak at any node or plate, crucial for calculating the heat load on specific cooling stages. 

@@ -67,6 +67,7 @@ const ConfigPanel: React.FC<Props> = ({
         id,
         label: `Wire ${id}`,
         color,
+        wireCount: 2,
         crossSectionalArea: 1.9635e-9,
         currentAmps: 0,
         segments: [
@@ -343,7 +344,30 @@ const ConfigPanel: React.FC<Props> = ({
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <div className={lbl}>Area (m²)</div>
+                    <div className={lbl}>Parallel Wires</div>
+                    <input
+                      type="number"
+                      className={inp}
+                      value={selectedWire.wireCount ?? 1}
+                      min={1}
+                      step={1}
+                      onChange={(e) => setWireField(selectedWire.id, 'wireCount', Math.max(1, parseInt(e.target.value) || 1))}
+                    />
+                  </div>
+                  <div>
+                    <div className={lbl}>Current Total (A)</div>
+                    <input
+                      type="number"
+                      className={inp}
+                      value={selectedWire.currentAmps}
+                      step={0.1}
+                      onChange={(e) => setWireField(selectedWire.id, 'currentAmps', parseFloat(e.target.value) || 0)}
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <div className={lbl}>Area / Wire (m²)</div>
                     <input
                       type="number"
                       className={inp}
@@ -353,15 +377,14 @@ const ConfigPanel: React.FC<Props> = ({
                     />
                   </div>
                   <div>
-                    <div className={lbl}>Current (A)</div>
-                    <input
-                      type="number"
-                      className={inp}
-                      value={selectedWire.currentAmps}
-                      step={0.1}
-                      onChange={(e) => setWireField(selectedWire.id, 'currentAmps', parseFloat(e.target.value) || 0)}
-                    />
+                    <div className={lbl}>Effective Area</div>
+                    <div className="text-xs text-gray-400 pt-1.5 font-mono">
+                      {((selectedWire.wireCount ?? 1) * selectedWire.crossSectionalArea).toExponential(3)} m²
+                    </div>
                   </div>
+                </div>
+                <div className="text-[8px] text-gray-600">
+                  Identical strands share the total current equally and conduct heat through their combined cross-section.
                 </div>
 
                 {/* Segments */}

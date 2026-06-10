@@ -70,8 +70,12 @@ const DEFAULT_PLATES: Plate[] = [
 const DEFAULT_WIRES: WireConfig[] = [
   {
     id: 0,
-    label: 'SC Lead (NbTi)',
+    label: 'SC Lead Pair (2x NbTi)',
     color: WIRE_COLORS[0],
+    // Two identical parallel wires running down the fridge. The total
+    // current is shared between them and heat conducts through the
+    // combined cross-section (A_eff = 2 * crossSectionalArea).
+    wireCount: 2,
     crossSectionalArea: 1.9635e-9,
     currentAmps: 7.5,
     segments: [
@@ -84,6 +88,7 @@ const DEFAULT_WIRES: WireConfig[] = [
     id: 1,
     label: 'Structural Support',
     color: WIRE_COLORS[1],
+    wireCount: 1,
     crossSectionalArea: 7.854e-9,
     currentAmps: 0,
     segments: [

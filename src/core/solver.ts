@@ -42,7 +42,17 @@ interface PlateRuntime {
 export class WireSolverState {
   readonly wireId: number;
   readonly N: number;
+  // Number of identical parallel strands represented by this wire entry.
+  // The bundle is solved as one effective channel: with every strand at
+  // the same temperature, the volumetric heat equation is identical for
+  // each strand, so only extensive quantities (area, fluxes, lumped
+  // joint mass/resistance) need scaling.
+  readonly wireCount: number;
+  // Per-strand cross-sectional area (m^2)
+  readonly areaPerWire: number;
+  // Effective conduction/mass area of the bundle: wireCount * areaPerWire
   readonly area: number;
+  // TOTAL current through the bundle; strands share it equally
   currentAmps: number;
   temperatures: Float64Array;
   k: Float64Array;
@@ -66,7 +76,9 @@ export class WireSolverState {
   constructor(wireConfig: WireConfig, N: number, plates: Plate[]) {
     this.wireId = wireConfig.id;
     this.N = N;
-    this.area = wireConfig.crossSectionalArea;
+    this.wireCount = Math.max(1, Math.round(wireConfig.wireCount ?? 1));
+    this.areaPerWire = wireConfig.crossSectionalArea;
+    this.area = this.wireCount * this.areaPerWire;
     this.currentAmps = wireConfig.currentAmps;
 
     this.temperatures = new Float64Array(N);
@@ -172,6 +184,16 @@ export class WireSolverState {
 
      PDE: rho*Cp * dT/dt = d/dx(k * dT/dx) + I^2*rhoE/A^2 + qExt
 
+     A is the EFFECTIVE area of the strand bundle (wireCount * A_wire)
+     and I is the TOTAL bundle current. For n identical parallel strands
+     each carrying I/n, the volumetric Joule density is
+       n * (I/n)^2 * rhoE / A_wire / (n * A_wire) = I^2 * rhoE / A^2,
+     i.e. exactly the single-channel form with the effective area, so the
+     tridiagonal coefficients keep their shape. The transient term
+     rho*Cp*dT/dt is intensive (same material in every strand); the
+     bundle's combined thermal mass rho*Cp*A*dx enters wherever lumped
+     (extensive) quantities are converted to volumetric ones.
+
      Crank-Nicolson (theta=0.5):
        gamma = rho_i*Cp_i / dt
        alpha_i = k_{i-1/2} / dx^2  (harmonic mean)
@@ -225,17 +247,19 @@ export class WireSolverState {
       let source = current * current * this.rhoE[i] / A2 + qExt;
 
       // -------- RESISTOR BOUNDARY NODE --------
-      // Inject lumped Joule heating Q = I^2 * R into the volumetric source
-      // (converted to W/m^3 by dividing by cell volume A * dx), and add the
-      // joint's lumped heat capacity to the node's thermal inertia. Without
-      // the joint mass, all of Q lands on the wire cell's ~nJ/K capacity and
-      // the first step overshoots by tens of kelvin at any nonzero current.
+      // Each of the n strands has its own joint of resistance R carrying
+      // I/n, so the bundle dissipates n * (I/n)^2 * R = I^2 * R / n
+      // (joints in parallel). The total is converted to W/m^3 over the
+      // combined cell volume A * dx. The n joints' lumped heat capacities
+      // are added to the node's thermal inertia: without joint mass, all
+      // of Q lands on the wire cells' ~nJ/K capacity and the first step
+      // overshoots by tens of kelvin at any nonzero current.
       if (plateType === 'resistor' && plateConfig) {
         const R = plateConfig.resistanceOhms || 0;
-        source += current * current * R / (A * dx);
+        source += current * current * (R / this.wireCount) / (A * dx);
 
         const Cjoint = plateConfig.heatCapacityJK || DEFAULT_RESISTOR_HEAT_CAPACITY_JK;
-        gamma += Cjoint / (A * dx * dt);
+        gamma += this.wireCount * Cjoint / (A * dx * dt);
       }
 
       // -------- CONSTRUCT MATRIX ROW --------
@@ -330,6 +354,9 @@ export class WireSolverState {
   /* ===========================================================
      Compute conductive heat flux at a specific node index
      Q = A * k * dT/dx (using central/one-sided differences)
+     A is the bundle's effective area, so the returned load includes
+     the contribution of every parallel strand (e.g. zero-current
+     conduction heat leak scales linearly with wireCount).
      Returns positive value = heat flowing INTO the node
      =========================================================== */
   computeHeatFluxAtNode(nodeIdx: number, dx: number): number {

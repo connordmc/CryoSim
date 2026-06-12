@@ -12,6 +12,14 @@
 //   8. Dual-wire equivalence: 2 strands == single channel of doubled area
 //   9. Dual-wire Joule heating: parallel paths halve dissipation at fixed
 //      total current; per-strand resistor joints combine as R/n
+//  10. Fridge-sunk 1-Ohm MC load at 1 mA settles near base temperature
+//      (the default app configuration's bottom plate)
+//  11. Quench handling: a resolvable normal-state NbTi march stays
+//      bounded; an unresolvable one (physical runaway faster than the
+//      deepest substep refinement) fails safe - clean throw, state
+//      rolled back, never NaN/negative/past the 10000 K guard
+//  12. Default app configuration (full 500-node dual-wire system) stays
+//      cryogenic - regression for the T > 10000 K runaway
 
 import { ThermalSolver } from '../src/core/solver';
 import type { SolverConfig, Plate, WireConfig } from '../src/types';
@@ -184,6 +192,93 @@ check('9. parallel paths halve Joule dissipation at fixed total current', () => 
   assert(riseS > 0, `single joint rise=${riseS}`);
   const jointRatio = riseD / riseS;
   assert(jointRatio > 0.2 && jointRatio < 0.3, `joint rise ratio=${jointRatio}, expected ~0.25`);
+});
+
+check('10. fridge-sunk 1-Ohm MC load at 1mA settles near base temperature', () => {
+  const solver = new ThermalSolver(config, [
+    { id: 0, nodeIndex: 0, temperature: 0.01, plateType: 'resistor', resistanceOhms: 1.0, coolingCapacityWatts: 0.000015, heatCapacityJK: 0.005 },
+    ...FIXED_TAIL,
+  ], [nbtiWire(0.001)]);
+  runSteps(solver, 2000);
+  const T0 = solver.getWireTemperatures(0)[0];
+  // I^2*R = 1 uW against a 15 uW sink: equilibrium where
+  // Q_max*tanh(T/4.2) = 1 uW is ~0.28 K. Must not run away.
+  assert(T0 > 0.01 && T0 < 1.0, `load T=${T0} K, expected ~0.3 K equilibrium`);
+});
+
+check('11. NbTi quench: resolvable march bounded, unresolvable fails safe', () => {
+  // Init profile crosses Tc = 9.2 K so nodes above Tc carry the full
+  // normal-state rhoE. At 0.1 A the march is steep but resolvable: it
+  // must integrate without error and stay physical.
+  const gentle = new ThermalSolver(config, [
+    { id: 0, nodeIndex: 0, temperature: 4.0, plateType: 'fixed' },
+    { id: 1, nodeIndex: 99, temperature: 20.0, plateType: 'fixed' },
+  ], [nbtiWire(0.1)]);
+  for (let s = 0; s < 50; s++) gentle.step(config.dt, null, s * config.dt);
+  const g = gentle.getGlobalMinMax();
+  assert(g.minT > 0, `minT=${g.minT}`);
+  assert(g.maxT < 10000, `maxT=${g.maxT}`);
+
+  // At 0.5 A the physical heating rate (~1e6 K/s) outruns the deepest
+  // substep refinement: the solver must throw a descriptive error and
+  // roll the state back rather than hand back NaN or 10000+ K.
+  const violent = new ThermalSolver(config, [
+    { id: 0, nodeIndex: 0, temperature: 4.0, plateType: 'fixed' },
+    { id: 1, nodeIndex: 99, temperature: 20.0, plateType: 'fixed' },
+  ], [nbtiWire(0.5)]);
+  const before = new Float64Array(violent.getWireTemperatures(0));
+  let threw = false;
+  try {
+    for (let s = 0; s < 50; s++) violent.step(config.dt, null, s * config.dt);
+  } catch (e: any) {
+    threw = true;
+    assert(/cannot stabilize/i.test(e.message), `unexpected error: ${e.message}`);
+  }
+  assert(threw, 'expected the unresolvable quench to throw');
+  const after = violent.getWireTemperatures(0);
+  for (let i = 0; i < 100; i++) {
+    assert(isFinite(after[i]) && after[i] > 0, `post-rollback T[${i}]=${after[i]}`);
+  }
+  // Whatever integrated before the failing step must itself be physical
+  assert(Math.max(...after) < 10000, `post-rollback maxT=${Math.max(...after)}`);
+  assert(Math.abs(after[0] - before[0]) < 1e-12, 'fixed boundary moved');
+});
+
+check('12. default app configuration stays cryogenic (T>10000K regression)', () => {
+  const appConfig: SolverConfig = { numNodes: 500, dx: 0.00687, dt: 0.005, powerFormula: 'return 0;' };
+  const appPlates: Plate[] = [
+    { id: 0, nodeIndex: 0, temperature: 0.010, plateType: 'resistor', resistanceOhms: 1.0, coolingCapacityWatts: 0.000015, heatCapacityJK: 0.005 },
+    { id: 1, nodeIndex: 175, temperature: 0.100, plateType: 'dynamic', coolingCapacityWatts: 0.0002, heatCapacityJK: 0.05 },
+    { id: 2, nodeIndex: 204, temperature: 0.800, plateType: 'dynamic', coolingCapacityWatts: 0.005, heatCapacityJK: 0.5 },
+    { id: 3, nodeIndex: 251, temperature: 4.0, plateType: 'fixed' },
+    { id: 4, nodeIndex: 281, temperature: 77.0, plateType: 'fixed' },
+    { id: 5, nodeIndex: 499, temperature: 300.0, plateType: 'fixed' },
+  ];
+  const appWires: WireConfig[] = [
+    {
+      id: 0, label: 'SC Lead Pair', color: '#0ff', wireCount: 2,
+      crossSectionalArea: 1.9635e-9, currentAmps: 0.001,
+      segments: [
+        { id: 0, name: 'Copper Lead-In', startNode: 0, endNode: 30, materialType: 'copper' },
+        { id: 1, name: 'NbTi Mixing Segment', startNode: 30, endNode: 50, materialType: 'nbti' },
+        { id: 2, name: 'Copper Segment 1', startNode: 50, endNode: 175, materialType: 'copper' },
+        { id: 3, name: 'NbTi Superconductor', startNode: 200, endNode: 255, materialType: 'nbti' },
+        { id: 4, name: 'Copper Lead-Out', startNode: 255, endNode: 499, materialType: 'copper' },
+      ],
+    },
+    {
+      id: 1, label: 'Structural Support', color: '#f66', wireCount: 1,
+      crossSectionalArea: 7.854e-9, currentAmps: 0,
+      segments: [{ id: 0, name: 'Full Copper', startNode: 0, endNode: 99, materialType: 'copper' }],
+    },
+  ];
+  const solver = new ThermalSolver(appConfig, appPlates, appWires);
+  for (let s = 0; s < 500; s++) solver.step(appConfig.dt, null, s * appConfig.dt);
+  const { minT, maxT } = solver.getGlobalMinMax();
+  assert(minT > 0, `minT=${minT}`);
+  assert(maxT <= 300.5, `maxT=${maxT} K, expected nothing hotter than the 300 K plate`);
+  const load = solver.getWireTemperatures(0)[0];
+  assert(load < 1.0, `MC load at ${load} K, expected sub-kelvin`);
 });
 
 console.log(failures === 0 ? '\nAll solver checks passed.' : `\n${failures} check(s) FAILED.`);

@@ -163,8 +163,8 @@ const ConfigPanel: React.FC<Props> = ({
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] text-gray-400 font-semibold">PLATE #{p.id}</span>
                     <div className="flex items-center gap-1">
-                      {p.plateType === 'dynamic' && liveTemp !== undefined && (
-                        <span className="text-[9px] text-emerald-400 font-mono">
+                      {(p.plateType === 'dynamic' || p.plateType === 'resistor') && liveTemp !== undefined && (
+                        <span className={`text-[9px] font-mono ${p.plateType === 'resistor' ? 'text-red-400' : 'text-emerald-400'}`}>
                           {liveTemp.toFixed(4)} K
                         </span>
                       )}
@@ -277,9 +277,22 @@ const ConfigPanel: React.FC<Props> = ({
                             onChange={(e) => setPlateField(p.id, 'heatCapacityJK', parseFloat(e.target.value) || 0.01)}
                           />
                         </div>
+                        <div>
+                          <div className={lbl}>Sink Q_max (W)</div>
+                          <input
+                            type="number"
+                            className={inp}
+                            value={p.coolingCapacityWatts || 0}
+                            step={0.000001}
+                            onChange={(e) => setPlateField(p.id, 'coolingCapacityWatts', parseFloat(e.target.value) || 0)}
+                          />
+                        </div>
                       </div>
                       <div className="text-[8px] text-gray-600">
-                        Q_joule = I^2 * R injected at the node; C_joint sets the joint's thermal mass
+                        Q_joule = I^2 * R / n injected at the node; C_joint sets the joint's thermal
+                        mass. Sink Q_max &gt; 0 heat-sinks the joint to the fridge
+                        (Q = Q_max * tanh(T/4.2)) as if mounted on a cooled stage; 0 leaves it
+                        floating on the wire.
                       </div>
                     </div>
                   )}

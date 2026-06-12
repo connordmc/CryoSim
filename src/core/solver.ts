@@ -2,7 +2,7 @@
 // Complete Crank-Nicolson Multi-Wire Thermal Solver with Three-State Boundaries
 
 import type { SolverConfig, Plate, PlateType, MaterialType, NodeState, WireConfig, StepResult } from '../types';
-import { interpolateTabulated, COPPER, NBTI, type MaterialTable } from '../constants/materials';
+import { interpolateTabulated, interpolateTabulatedSlope, COPPER, NBTI, type MaterialTable } from '../constants/materials';
 
 /* ===================================================================
    FRIDGE COOLING CURVE
@@ -58,6 +58,9 @@ export class WireSolverState {
   k: Float64Array;
   cp: Float64Array;
   rhoE: Float64Array;
+  // d(rhoE)/dT of the tabulated lookup, used to linearize the Joule
+  // source implicitly (see crankNicolsonStep).
+  drhoEdT: Float64Array;
   rho: Float64Array;
   materialType: MaterialType[];
   plateTypeAtNode: (PlateType | null)[];
@@ -85,6 +88,7 @@ export class WireSolverState {
     this.k = new Float64Array(N);
     this.cp = new Float64Array(N);
     this.rhoE = new Float64Array(N);
+    this.drhoEdT = new Float64Array(N);
     this.rho = new Float64Array(N);
     this.materialType = new Array<MaterialType>(N).fill('copper');
     this.isFixed = new Array<boolean>(N).fill(false);
@@ -175,6 +179,7 @@ export class WireSolverState {
       this.k[i] = Math.max(interpolateTabulated(T, mat.temperatures, mat.k), 1e-12);
       this.cp[i] = Math.max(interpolateTabulated(T, mat.temperatures, mat.cp), 1e-8);
       this.rhoE[i] = Math.max(interpolateTabulated(T, mat.temperatures, mat.rhoE), 0);
+      this.drhoEdT[i] = interpolateTabulatedSlope(T, mat.temperatures, mat.rhoE);
       this.rho[i] = mat.rho;
     }
   }
@@ -217,7 +222,11 @@ export class WireSolverState {
                      effectively constant during one wire solve)
        'resistor' -> participates in CN system with Joule source injection
                      and the joint's lumped heat capacity added to the
-                     node's thermal inertia
+                     node's thermal inertia; if coolingCapacityWatts is
+                     set, the joint is heat-sunk to the fridge via a
+                     linearized tanh cooling curve (it models a load
+                     mounted on a cooled stage rather than a joint
+                     floating on the wire end)
        Node 0 (no plate): Neumann (insulated) via ghost-node symmetry
      =========================================================== */
   crankNicolsonStep(dt: number, dx: number, qExt: number): void {
@@ -246,6 +255,23 @@ export class WireSolverState {
       // Base volumetric source: Joule heating + external power
       let source = current * current * this.rhoE[i] / A2 + qExt;
 
+      // -------- SOURCE-JACOBIAN STABILIZATION --------
+      // The Joule source q(T) = I^2 * rhoE(T) / A^2 is lagged at T^n, so
+      // wherever d(rhoE)/dT > 0 (copper above ~20 K, the NbTi step at Tc)
+      // the explicit source is positive feedback: each solve overshoots
+      // the physical growth rate and the runaway is numerical as well as
+      // physical. Following the C++ reference (cpp_sim a7d2951), add the
+      // clamped source Jacobian J = I^2 * (drhoE/dT) / A^2 to the row.
+      // Folding J into gamma puts +J on the diagonal and +J*T^n on the
+      // RHS (every row uses gamma symmetrically), which damps the update
+      // toward the linearized source rate, keeps the matrix strictly
+      // diagonally dominant, and vanishes identically at steady state.
+      const gamma0 = gamma;
+      if (current !== 0 && this.drhoEdT[i] > 0) {
+        const jq = current * current * this.drhoEdT[i] / A2;
+        gamma += Math.min(jq, 1e3 * gamma0);
+      }
+
       // -------- RESISTOR BOUNDARY NODE --------
       // Each of the n strands has its own joint of resistance R carrying
       // I/n, so the bundle dissipates n * (I/n)^2 * R = I^2 * R / n
@@ -260,6 +286,20 @@ export class WireSolverState {
 
         const Cjoint = plateConfig.heatCapacityJK || DEFAULT_RESISTOR_HEAT_CAPACITY_JK;
         gamma += this.wireCount * Cjoint / (A * dx * dt);
+
+        // A resistor joint mounted on a cooled stage (e.g. the 1-Ohm load
+        // bolted to the mixing chamber) sinks heat to the fridge. Without
+        // this term the joint hangs off the wire end thermally isolated:
+        // even microwatts then ride the wire's ~1e-10 W/K conductance to
+        // thousands of kelvin. Backward-Euler linearization of the fridge
+        // curve (sink at T^n explicit, dQ/dT implicit via gamma) matches
+        // the dynamic-plate treatment and cannot undershoot equilibrium.
+        const Qcap = plateConfig.coolingCapacityWatts || 0;
+        if (Qcap > 0) {
+          const vol = A * dx;
+          source -= fridgeCoolingPower(this.temperatures[i], Qcap) / vol;
+          gamma += fridgeCoolingDerivative(this.temperatures[i], Qcap) / vol;
+        }
       }
 
       // -------- CONSTRUCT MATRIX ROW --------

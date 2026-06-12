@@ -1,5 +1,5 @@
 import React from 'react';
-import { Play, Pause, RotateCcw, ChevronRight, Download } from 'lucide-react';
+import { Play, Pause, RotateCcw, ChevronRight, Download, ScrollText } from 'lucide-react';
 
 interface Props {
   isRunning: boolean;
@@ -9,10 +9,12 @@ interface Props {
   minT: number;
   numWires: number;
   error: string | null;
+  logCount: number;
   onToggle: () => void;
   onReset: () => void;
   onStep: () => void;
   onExport: () => void;
+  onOpenLog: () => void;
 }
 
 const Metric: React.FC<{ label: string; value: string; accent?: string }> = ({
@@ -27,8 +29,8 @@ const Metric: React.FC<{ label: string; value: string; accent?: string }> = ({
 );
 
 const TelemetryBar: React.FC<Props> = ({
-  isRunning, stepCount, simTime, maxT, minT, numWires, error,
-  onToggle, onReset, onStep, onExport,
+  isRunning, stepCount, simTime, maxT, minT, numWires, error, logCount,
+  onToggle, onReset, onStep, onExport, onOpenLog,
 }) => {
   const btn =
     'px-2.5 py-1.5 bg-[#161b22] border border-[#21262d] rounded text-xs text-gray-300 hover:bg-[#1c2129] hover:text-white transition-colors flex items-center gap-1.5 disabled:opacity-40';
@@ -58,10 +60,24 @@ const TelemetryBar: React.FC<Props> = ({
       </div>
 
       {error && (
-        <span className="text-[10px] text-red-400 truncate max-w-[260px]" title={error}>
+        <button
+          className="text-[10px] text-red-400 truncate max-w-[260px] text-left hover:underline cursor-pointer"
+          title={`${error}\n\nClick to open the full log.`}
+          onClick={onOpenLog}
+        >
           {error}
-        </span>
+        </button>
       )}
+
+      {/* Full untruncated error/warning history */}
+      <button className={btn + ' relative'} onClick={onOpenLog} title="Open solver event log">
+        <ScrollText size={13} /> LOG
+        {logCount > 0 && (
+          <span className="absolute -top-1.5 -right-1.5 min-w-[16px] h-4 px-1 rounded-full bg-red-500/90 text-white text-[9px] leading-4 text-center font-semibold">
+            {logCount > 99 ? '99+' : logCount}
+          </span>
+        )}
+      </button>
 
       <button className={btn} onClick={onExport}>
         <Download size={13} /> CSV

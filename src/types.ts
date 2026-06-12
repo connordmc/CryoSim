@@ -70,6 +70,17 @@ export interface SolverConfig {
   powerFormula: string;
 }
 
+// One entry in the solver event log (untruncated error/warning history
+// surfaced through the telemetry-bar LOG button).
+export interface LogEntry {
+  id: number;
+  wallTime: Date;
+  step: number;
+  simTime: number;
+  kind: 'error' | 'warning';
+  message: string;
+}
+
 export interface StepResult {
   maxDeltaT: number;
   actualDt: number;

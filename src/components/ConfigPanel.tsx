@@ -287,12 +287,34 @@ const ConfigPanel: React.FC<Props> = ({
                             onChange={(e) => setPlateField(p.id, 'coolingCapacityWatts', parseFloat(e.target.value) || 0)}
                           />
                         </div>
+                        <div>
+                          <div className={lbl}>Bias I (A)</div>
+                          <input
+                            type="number"
+                            className={inp}
+                            value={p.currentAmps ?? ''}
+                            placeholder="wire I"
+                            step={0.001}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              onPlatesChange(plates.map((pl) => {
+                                if (pl.id !== p.id) return pl;
+                                if (v === '') {
+                                  const { currentAmps: _drop, ...rest } = pl;
+                                  return rest as Plate;
+                                }
+                                return { ...pl, currentAmps: parseFloat(v) || 0 };
+                              }));
+                            }}
+                          />
+                        </div>
                       </div>
                       <div className="text-[8px] text-gray-600">
-                        Q_joule = I^2 * R / n injected at the node; C_joint sets the joint's thermal
-                        mass. Sink Q_max &gt; 0 heat-sinks the joint to the fridge
-                        (Q = Q_max * tanh(T/4.2)) as if mounted on a cooled stage; 0 leaves it
-                        floating on the wire.
+                        Bias I set: the resistor is its own circuit, Q = I_bias^2 * R (an SC load
+                        carries the lead current dissipation-free). Bias empty: it is a joint in
+                        the wire circuit, Q = I_wire^2 * R / n. C_joint sets thermal mass; Sink
+                        Q_max &gt; 0 heat-sinks the joint to the fridge (Q_max * tanh(T/4.2)), 0
+                        leaves it floating on the wire.
                       </div>
                     </div>
                   )}

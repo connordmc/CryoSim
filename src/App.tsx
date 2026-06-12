@@ -30,11 +30,19 @@ const DEFAULT_PLATES: Plate[] = [
     // original PythonSim LOAD_RESISTANCE = 1.0). It is heat-sunk to the
     // MC stage, so it keeps the MC's fridge cooling curve; without that
     // sink the load floats on the wire end and even microwatts run away.
+    //
+    // currentAmps here is the load's own bias current, decoupled from
+    // the 7.5 A lead current: the load is superconducting at the
+    // operating point and carries the lead current dissipation-free
+    // (7.5 A through a normal 1-Ohm element would be 56 W - six orders
+    // of magnitude over the MC's cooling power, impossible in the
+    // physically tested system). Raise the bias to study heater loads.
     id: 0,
     nodeIndex: 0,
     temperature: 0.010,
     plateType: 'resistor',
     resistanceOhms: 1.0,
+    currentAmps: 0,
     coolingCapacityWatts: 0.000015,
     heatCapacityJK: 0.005,
   },
@@ -83,22 +91,19 @@ const DEFAULT_WIRES: WireConfig[] = [
     // current is shared between them and heat conducts through the
     // combined cross-section (A_eff = 2 * crossSectionalArea).
     wireCount: 2,
-    crossSectionalArea: 1.9635e-9,
-    // Default operating current. The 1-Ohm MC load dissipates I^2*R/2
-    // (per-strand joints in parallel): at 1 mA that is 0.5 uW against
-    // the MC's 15 uW cooling capacity, so the load settles near 0.1 K.
-    // The previous default of 7.5 A meant 28 W at the load and a current
-    // density of ~2e9 A/m^2 in the 50-um copper segments - both orders
-    // of magnitude beyond any cryogenic steady state, which is why the
-    // solver marched to the 10000 K guard. (The original PythonSim ran
-    // this exact 1-Ohm load study at I = 0: "Zero-Load Conduction Leak".)
-    currentAmps: 0.001,
+    // O1.5 mm per strand. The physically tested system carries 7.5 A,
+    // which constrains the geometry: the 4K->300K copper section must be
+    // mm-scale (at the old O50 um, J ~ 2e9 A/m^2 and the copper runs
+    // away thermally - the T > 10000 K error), and everything below the
+    // 4 K plate must be superconducting NbTi (any copper at mK carrying
+    // 7.5 A dumps watts into uW-scale stages). With this area the
+    // 77->300 K span bulges only ~40 K mid-span at 7.5 A, and the fat
+    // NbTi section still leaks <2 uW to the cold stages (k_NbTi is low).
+    crossSectionalArea: 1.767e-6,
+    currentAmps: 7.5,
     segments: [
-      { id: 0, name: 'Copper Lead-In',      startNode: 0,  endNode: 30, materialType: 'copper' },
-      { id: 1, name: 'NbTi Mixing Segment', startNode: 30, endNode: 50, materialType: 'nbti' },
-      { id: 2, name: 'Copper Segment 1', startNode: 50, endNode: 175, materialType: 'copper' },
-      { id: 3, name: 'NbTi Superconductor', startNode: 200, endNode: 255, materialType: 'nbti' },
-      { id: 4, name: 'Copper Lead-Out',     startNode: 255, endNode: 499, materialType: 'copper' },
+      { id: 0, name: 'NbTi SC Lead (MXC to 4K)', startNode: 0,   endNode: 251, materialType: 'nbti' },
+      { id: 1, name: 'Copper Lead (4K to 300K)', startNode: 251, endNode: 499, materialType: 'copper' },
     ],
   },
   {

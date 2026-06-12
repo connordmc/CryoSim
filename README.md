@@ -64,20 +64,41 @@ source term combined with the default operating point:
   (~10⁻¹⁰ W/K to the nearest plate) even microwatts rode to thousands of
   kelvin. A load bolted to the mixing chamber is cooled by it; `0` (the
   prior behavior) still models a floating joint.
+- **Resistor plates have two circuit modes.** With `currentAmps` set on
+  the plate ("Bias I" in the UI), the resistor is its own circuit — a
+  heater, thermometer, or a load that is superconducting at the operating
+  point and carries the lead current dissipation-free — dissipating
+  `I_bias²·R` (split across the wires terminating at the node). With it
+  unset, the resistor is a *joint* in the wire's circuit and carries the
+  wire's bundle current (`I²R/n`, per-strand joints in parallel), the
+  original behavior.
 
 ### Default configuration (`src/App.tsx`)
 
-- **Bottom plate is now the lumped 1 Ω load**: `resistor`, `nodeIndex 0`,
-  init 0.01 K, heat-sunk to the MC stage (Q_max = 15 µW, C = 5 mJ/K) — the
+The default models the **physically tested operating point: 7.5 A** through
+the SC lead pair. Carrying 7.5 A constrains the rest of the configuration —
+the runaway analyzed above was the old geometry contradicting that current,
+not the current itself:
+
+- **Bottom plate is the lumped 1 Ω load**: `resistor`, `nodeIndex 0`, init
+  0.01 K, heat-sunk to the MC stage (Q_max = 15 µW, C = 5 mJ/K) — the
   counterpart of cpp_sim's `qgen_base(1.0, I)` bottom node and PythonSim's
-  `LOAD_RESISTANCE = 1.0`.
-- **Default lead current 7.5 A → 1 mA.** At 1 mA the load dissipates
-  0.5 µW and settles near 0.1–0.3 K; the Ø50 µm copper segments carry a
-  benign current density. 7.5 A in this geometry has no bounded solution
-  (see analysis above) — if you raise the current, raise the cross-section
-  with it.
-- Fixed the `Copper Lead-Out` segment end node (500 → 499, was out of
-  bounds and silently clamped).
+  `LOAD_RESISTANCE = 1.0`. Its **bias current defaults to 0**: the load is
+  superconducting at the operating point and carries the 7.5 A lead
+  current dissipation-free. (A normal 1 Ω element in the 7.5 A loop would
+  dissipate 56 W at the mixing chamber — six orders of magnitude over its
+  cooling power — which the physically working system rules out. Set
+  "Bias I" on the plate to study heater dissipation.)
+- **Lead geometry sized for 7.5 A**: Ø1.5 mm per strand (was Ø50 µm), NbTi
+  from the load up to the 4 K plate (superconducting below Tc ⇒ zero
+  Joule heat in the mK region at any current up to I_c), copper from the
+  4 K plate to 300 K. At 7.5 A the 77→300 K copper span bulges only
+  ~40 K mid-span, and the NbTi section leaks <2 µW into the cold stages
+  (NbTi thermal conductivity is tiny below 1 K).
+- The old segment layout (Ø50 µm with copper segments *below* the 0.1 K
+  plate) put ~4.4 W/m of Joule heat into the millikelvin region at 7.5 A —
+  that, plus the load in joint mode, was the unbounded "source". Fixed the
+  out-of-bounds segment end node (500 → 499) along the way.
 
 ### Error log UI (`TelemetryBar.tsx`, `ErrorLogModal.tsx`, `App.tsx`)
 
@@ -103,8 +124,13 @@ source term combined with the default operating point:
     unresolvable one (physical runaway faster than the deepest substep
     refinement) throws a descriptive error with the state rolled back,
     never NaN/negative/10 000+ K;
-  - **12** — the full 500-node default dual-wire configuration stays
-    cryogenic (direct regression for the reported `T > 10000 K` error).
+  - **12** — the full 500-node default dual-wire configuration at the
+    tested 7.5 A stays cryogenic with the NbTi lead below Tc everywhere
+    (direct regression for the reported `T > 10000 K` error);
+  - **13** — resistor bias mode decouples load heating from the lead
+    current: an SC load (bias 0) on a 7.5 A lead stays cold, joint mode
+    at 7.5 A heats drastically or fails safe, and a 10 mW heater bias
+    warms the load boundedly.
 
 ### Known modeling difference vs. cpp_sim (intentional, documented)
 

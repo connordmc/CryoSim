@@ -29,6 +29,12 @@ export interface Plate {
   // Lumped boundary resistance (Ohms) PER STRAND. Strands' joints sit
   // electrically in parallel, so a bundle of n sees R_eff = R / n.
   resistanceOhms?: number;
+  // Resistor mode: bias/excitation current (A) through the lumped
+  // resistor when it is its own circuit (a heater, thermometer, or a
+  // load that is superconducting at the operating point and carries the
+  // lead current dissipation-free). When undefined the resistor is a
+  // JOINT in the wire's circuit and carries the wire's bundle current.
+  currentAmps?: number;
 }
 
 export interface LumpedResistor {

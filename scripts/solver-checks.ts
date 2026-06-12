@@ -18,8 +18,12 @@
 //      bounded; an unresolvable one (physical runaway faster than the
 //      deepest substep refinement) fails safe - clean throw, state
 //      rolled back, never NaN/negative/past the 10000 K guard
-//  12. Default app configuration (full 500-node dual-wire system) stays
-//      cryogenic - regression for the T > 10000 K runaway
+//  12. Default app configuration (full 500-node dual-wire system at the
+//      physically tested 7.5 A) stays cryogenic - regression for the
+//      T > 10000 K runaway
+//  13. Resistor bias mode: a load with its own bias current is decoupled
+//      from the wire's lead current (SC load at 7.5 A stays cold; joint
+//      mode still uses the wire current)
 
 import { ThermalSolver } from '../src/core/solver';
 import type { SolverConfig, Plate, WireConfig } from '../src/types';
@@ -244,10 +248,10 @@ check('11. NbTi quench: resolvable march bounded, unresolvable fails safe', () =
   assert(Math.abs(after[0] - before[0]) < 1e-12, 'fixed boundary moved');
 });
 
-check('12. default app configuration stays cryogenic (T>10000K regression)', () => {
+check('12. default app config at 7.5 A stays cryogenic (T>10000K regression)', () => {
   const appConfig: SolverConfig = { numNodes: 500, dx: 0.00687, dt: 0.005, powerFormula: 'return 0;' };
   const appPlates: Plate[] = [
-    { id: 0, nodeIndex: 0, temperature: 0.010, plateType: 'resistor', resistanceOhms: 1.0, coolingCapacityWatts: 0.000015, heatCapacityJK: 0.005 },
+    { id: 0, nodeIndex: 0, temperature: 0.010, plateType: 'resistor', resistanceOhms: 1.0, currentAmps: 0, coolingCapacityWatts: 0.000015, heatCapacityJK: 0.005 },
     { id: 1, nodeIndex: 175, temperature: 0.100, plateType: 'dynamic', coolingCapacityWatts: 0.0002, heatCapacityJK: 0.05 },
     { id: 2, nodeIndex: 204, temperature: 0.800, plateType: 'dynamic', coolingCapacityWatts: 0.005, heatCapacityJK: 0.5 },
     { id: 3, nodeIndex: 251, temperature: 4.0, plateType: 'fixed' },
@@ -257,13 +261,10 @@ check('12. default app configuration stays cryogenic (T>10000K regression)', () 
   const appWires: WireConfig[] = [
     {
       id: 0, label: 'SC Lead Pair', color: '#0ff', wireCount: 2,
-      crossSectionalArea: 1.9635e-9, currentAmps: 0.001,
+      crossSectionalArea: 1.767e-6, currentAmps: 7.5,
       segments: [
-        { id: 0, name: 'Copper Lead-In', startNode: 0, endNode: 30, materialType: 'copper' },
-        { id: 1, name: 'NbTi Mixing Segment', startNode: 30, endNode: 50, materialType: 'nbti' },
-        { id: 2, name: 'Copper Segment 1', startNode: 50, endNode: 175, materialType: 'copper' },
-        { id: 3, name: 'NbTi Superconductor', startNode: 200, endNode: 255, materialType: 'nbti' },
-        { id: 4, name: 'Copper Lead-Out', startNode: 255, endNode: 499, materialType: 'copper' },
+        { id: 0, name: 'NbTi SC Lead (MXC to 4K)', startNode: 0, endNode: 251, materialType: 'nbti' },
+        { id: 1, name: 'Copper Lead (4K to 300K)', startNode: 251, endNode: 499, materialType: 'copper' },
       ],
     },
     {
@@ -279,6 +280,46 @@ check('12. default app configuration stays cryogenic (T>10000K regression)', () 
   assert(maxT <= 300.5, `maxT=${maxT} K, expected nothing hotter than the 300 K plate`);
   const load = solver.getWireTemperatures(0)[0];
   assert(load < 1.0, `MC load at ${load} K, expected sub-kelvin`);
+  // The NbTi lead must stay superconducting below the 4 K plate
+  const T = solver.getWireTemperatures(0);
+  for (let i = 0; i < 251; i++) assert(T[i] < 9.2, `NbTi node ${i} at ${T[i]} K >= Tc`);
+});
+
+check('13. resistor bias mode decouples load heating from the lead current', () => {
+  // SC load (bias 0) on a 7.5 A lead: no Joule injection at the node.
+  const scLoad = (bias: number | undefined): Plate => ({
+    id: 0, nodeIndex: 0, temperature: 0.01, plateType: 'resistor',
+    resistanceOhms: 1.0, heatCapacityJK: 0.005, coolingCapacityWatts: 0.000015,
+    ...(bias !== undefined ? { currentAmps: bias } : {}),
+  });
+  const wire = (current: number): WireConfig => ({
+    id: 0, label: 'w0', color: '#0ff', wireCount: 2, crossSectionalArea: 1.767e-6,
+    currentAmps: current,
+    segments: [{ id: 0, name: 'NbTi', startNode: 0, endNode: 99, materialType: 'nbti' }],
+  });
+  const biased = new ThermalSolver(config, [scLoad(0), ...FIXED_TAIL], [wire(7.5)]);
+  runSteps(biased, 500);
+  const Tload = biased.getWireTemperatures(0)[0];
+  assert(Tload < 0.5, `bias-0 load on 7.5 A lead at ${Tload} K, expected cold`);
+
+  // Same system in joint mode (no bias field): the joint carries 7.5 A
+  // and must heat hard and fast - I^2*R/2 = 28 W has no cold solution.
+  const joint = new ThermalSolver(config, [scLoad(undefined), ...FIXED_TAIL], [wire(7.5)]);
+  let jointHot = false;
+  try {
+    runSteps(joint, 500);
+    jointHot = joint.getWireTemperatures(0)[0] > 100;
+  } catch (e: any) {
+    jointHot = /cannot stabilize|10000 K/i.test(e.message);
+  }
+  assert(jointHot, 'joint-mode 1-Ohm at 7.5 A should heat drastically or fail safe');
+
+  // A 10 mW heater bias (0.1 A through 1 Ohm) warms the load visibly but
+  // boundedly past the 15 uW sink, riding conduction up the lead.
+  const heater = new ThermalSolver(config, [scLoad(0.1), ...FIXED_TAIL], [wire(7.5)]);
+  runSteps(heater, 200);
+  const Theater = heater.getWireTemperatures(0)[0];
+  assert(Theater > 0.5 && Theater < 10000, `heater load at ${Theater} K`);
 });
 
 console.log(failures === 0 ? '\nAll solver checks passed.' : `\n${failures} check(s) FAILED.`);

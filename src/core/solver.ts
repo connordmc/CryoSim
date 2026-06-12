@@ -54,6 +54,10 @@ export class WireSolverState {
   readonly area: number;
   // TOTAL current through the bundle; strands share it equally
   currentAmps: number;
+  // Number of wire entries in the whole system: a bias-driven resistor
+  // plate is one physical object shared by every wire crossing its node,
+  // so its power is split evenly across them.
+  readonly totalWires: number;
   temperatures: Float64Array;
   k: Float64Array;
   cp: Float64Array;
@@ -76,9 +80,10 @@ export class WireSolverState {
   private cprime: Float64Array;
   private dprime: Float64Array;
 
-  constructor(wireConfig: WireConfig, N: number, plates: Plate[]) {
+  constructor(wireConfig: WireConfig, N: number, plates: Plate[], totalWires: number = 1) {
     this.wireId = wireConfig.id;
     this.N = N;
+    this.totalWires = Math.max(1, totalWires);
     this.wireCount = Math.max(1, Math.round(wireConfig.wireCount ?? 1));
     this.areaPerWire = wireConfig.crossSectionalArea;
     this.area = this.wireCount * this.areaPerWire;
@@ -282,7 +287,18 @@ export class WireSolverState {
       // overshoots by tens of kelvin at any nonzero current.
       if (plateType === 'resistor' && plateConfig) {
         const R = plateConfig.resistanceOhms || 0;
-        source += current * current * (R / this.wireCount) / (A * dx);
+        if (plateConfig.currentAmps !== undefined) {
+          // Bias mode: the resistor is its own circuit (heater/sample/
+          // SC load) carrying plateConfig.currentAmps, NOT the wire's
+          // lead current. One physical element: P = I_bias^2 * R, split
+          // evenly across the wires terminating at this node.
+          const biasI = plateConfig.currentAmps;
+          source += biasI * biasI * R / this.totalWires / (A * dx);
+        } else {
+          // Joint mode: the resistor sits in the wire's circuit and
+          // carries the bundle current (per-strand joints in parallel).
+          source += current * current * (R / this.wireCount) / (A * dx);
+        }
 
         const Cjoint = plateConfig.heatCapacityJK || DEFAULT_RESISTOR_HEAT_CAPACITY_JK;
         gamma += this.wireCount * Cjoint / (A * dx * dt);
@@ -474,7 +490,7 @@ export class ThermalSolver {
     }));
 
     for (const wc of wireConfigs) {
-      const ws = new WireSolverState(wc, this.N, plates);
+      const ws = new WireSolverState(wc, this.N, plates, wireConfigs.length);
       this.wires.push(ws);
       this.wireMap.set(wc.id, ws);
     }

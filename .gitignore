@@ -5,3 +5,5 @@ node_modules/
 .DS_Store
 .venv/
 
+# Ignore build output
+dist/

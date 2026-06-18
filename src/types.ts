@@ -21,9 +21,20 @@ export interface Plate {
   // Fixed mode: temperature is the Dirichlet value
   // Dynamic mode fields:
   coolingCapacityWatts?: number;   // Q_max for the fridge curve (W)
-  heatCapacityJK?: number;         // C_plate (J/K)
+  // Dynamic mode: C_plate; Resistor mode: lumped joint thermal mass (J/K).
+  // For resistor plates on multi-strand wires this is PER JOINT (each
+  // strand has its own joint); the solver sums them.
+  heatCapacityJK?: number;
   // Resistor mode fields:
-  resistanceOhms?: number;         // Lumped boundary resistance (Ohms)
+  // Lumped boundary resistance (Ohms) PER STRAND. Strands' joints sit
+  // electrically in parallel, so a bundle of n sees R_eff = R / n.
+  resistanceOhms?: number;
+  // Resistor mode: bias/excitation current (A) through the lumped
+  // resistor when it is its own circuit (a heater, thermometer, or a
+  // load that is superconducting at the operating point and carries the
+  // lead current dissipation-free). When undefined the resistor is a
+  // JOINT in the wire's circuit and carries the wire's bundle current.
+  currentAmps?: number;
 }
 
 export interface LumpedResistor {
@@ -35,8 +46,13 @@ export interface WireConfig {
   id: number;
   label: string;
   color: string;
-  crossSectionalArea: number; // m^2
-  currentAmps: number;
+  // Number of identical parallel wires this entry represents (>= 1).
+  // The strands run the same path, share `currentAmps` equally (parallel
+  // electrical paths), and conduct heat through their combined area.
+  // Defaults to 1 when omitted.
+  wireCount?: number;
+  crossSectionalArea: number; // m^2 PER WIRE; effective area = wireCount * this
+  currentAmps: number;        // TOTAL current through the bundle (A)
   segments: MaterialSegment[];
   resistors?: LumpedResistor[];
 }
@@ -58,6 +74,17 @@ export interface SolverConfig {
   dx: number;
   dt: number;
   powerFormula: string;
+}
+
+// One entry in the solver event log (untruncated error/warning history
+// surfaced through the telemetry-bar LOG button).
+export interface LogEntry {
+  id: number;
+  wallTime: Date;
+  step: number;
+  simTime: number;
+  kind: 'error' | 'warning';
+  message: string;
 }
 
 export interface StepResult {

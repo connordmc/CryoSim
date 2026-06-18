@@ -67,6 +67,7 @@ const ConfigPanel: React.FC<Props> = ({
         id,
         label: `Wire ${id}`,
         color,
+        wireCount: 2,
         crossSectionalArea: 1.9635e-9,
         currentAmps: 0,
         segments: [
@@ -162,8 +163,8 @@ const ConfigPanel: React.FC<Props> = ({
                   <div className="flex items-center justify-between">
                     <span className="text-[10px] text-gray-400 font-semibold">PLATE #{p.id}</span>
                     <div className="flex items-center gap-1">
-                      {p.plateType === 'dynamic' && liveTemp !== undefined && (
-                        <span className="text-[9px] text-emerald-400 font-mono">
+                      {(p.plateType === 'dynamic' || p.plateType === 'resistor') && liveTemp !== undefined && (
+                        <span className={`text-[9px] font-mono ${p.plateType === 'resistor' ? 'text-red-400' : 'text-emerald-400'}`}>
                           {liveTemp.toFixed(4)} K
                         </span>
                       )}
@@ -255,18 +256,65 @@ const ConfigPanel: React.FC<Props> = ({
                   {p.plateType === 'resistor' && (
                     <div className="space-y-1.5 bg-[#0d1117] border border-[#21262d] rounded p-2">
                       <div className="text-[9px] text-red-400 font-semibold">Lumped Resistor Parameters</div>
-                      <div>
-                        <div className={lbl}>Resistance (Ohms)</div>
-                        <input
-                          type="number"
-                          className={inp}
-                          value={p.resistanceOhms || 0}
-                          step={0.001}
-                          onChange={(e) => setPlateField(p.id, 'resistanceOhms', parseFloat(e.target.value) || 0)}
-                        />
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <div className={lbl}>Resistance (Ohms)</div>
+                          <input
+                            type="number"
+                            className={inp}
+                            value={p.resistanceOhms || 0}
+                            step={0.001}
+                            onChange={(e) => setPlateField(p.id, 'resistanceOhms', parseFloat(e.target.value) || 0)}
+                          />
+                        </div>
+                        <div>
+                          <div className={lbl}>C_joint (J/K)</div>
+                          <input
+                            type="number"
+                            className={inp}
+                            value={p.heatCapacityJK ?? 0.01}
+                            step={0.001}
+                            onChange={(e) => setPlateField(p.id, 'heatCapacityJK', parseFloat(e.target.value) || 0.01)}
+                          />
+                        </div>
+                        <div>
+                          <div className={lbl}>Sink Q_max (W)</div>
+                          <input
+                            type="number"
+                            className={inp}
+                            value={p.coolingCapacityWatts || 0}
+                            step={0.000001}
+                            onChange={(e) => setPlateField(p.id, 'coolingCapacityWatts', parseFloat(e.target.value) || 0)}
+                          />
+                        </div>
+                        <div>
+                          <div className={lbl}>Bias I (A)</div>
+                          <input
+                            type="number"
+                            className={inp}
+                            value={p.currentAmps ?? ''}
+                            placeholder="wire I"
+                            step={0.001}
+                            onChange={(e) => {
+                              const v = e.target.value;
+                              onPlatesChange(plates.map((pl) => {
+                                if (pl.id !== p.id) return pl;
+                                if (v === '') {
+                                  const { currentAmps: _drop, ...rest } = pl;
+                                  return rest as Plate;
+                                }
+                                return { ...pl, currentAmps: parseFloat(v) || 0 };
+                              }));
+                            }}
+                          />
+                        </div>
                       </div>
                       <div className="text-[8px] text-gray-600">
-                        Q_joule = I^2 * R (injected into matrix RHS)
+                        Bias I set: the resistor is its own circuit, Q = I_bias^2 * R (an SC load
+                        carries the lead current dissipation-free). Bias empty: it is a joint in
+                        the wire circuit, Q = I_wire^2 * R / n. C_joint sets thermal mass; Sink
+                        Q_max &gt; 0 heat-sinks the joint to the fridge (Q_max * tanh(T/4.2)), 0
+                        leaves it floating on the wire.
                       </div>
                     </div>
                   )}
@@ -331,7 +379,30 @@ const ConfigPanel: React.FC<Props> = ({
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
-                    <div className={lbl}>Area (m²)</div>
+                    <div className={lbl}>Parallel Wires</div>
+                    <input
+                      type="number"
+                      className={inp}
+                      value={selectedWire.wireCount ?? 1}
+                      min={1}
+                      step={1}
+                      onChange={(e) => setWireField(selectedWire.id, 'wireCount', Math.max(1, parseInt(e.target.value) || 1))}
+                    />
+                  </div>
+                  <div>
+                    <div className={lbl}>Current Total (A)</div>
+                    <input
+                      type="number"
+                      className={inp}
+                      value={selectedWire.currentAmps}
+                      step={0.1}
+                      onChange={(e) => setWireField(selectedWire.id, 'currentAmps', parseFloat(e.target.value) || 0)}
+                    />
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <div className={lbl}>Area / Wire (m²)</div>
                     <input
                       type="number"
                       className={inp}
@@ -341,15 +412,14 @@ const ConfigPanel: React.FC<Props> = ({
                     />
                   </div>
                   <div>
-                    <div className={lbl}>Current (A)</div>
-                    <input
-                      type="number"
-                      className={inp}
-                      value={selectedWire.currentAmps}
-                      step={0.1}
-                      onChange={(e) => setWireField(selectedWire.id, 'currentAmps', parseFloat(e.target.value) || 0)}
-                    />
+                    <div className={lbl}>Effective Area</div>
+                    <div className="text-xs text-gray-400 pt-1.5 font-mono">
+                      {((selectedWire.wireCount ?? 1) * selectedWire.crossSectionalArea).toExponential(3)} m²
+                    </div>
                   </div>
+                </div>
+                <div className="text-[8px] text-gray-600">
+                  Identical strands share the total current equally and conduct heat through their combined cross-section.
                 </div>
 
                 {/* Segments */}

@@ -238,3 +238,24 @@ export function interpolateTabulated(
   const frac = (T - temps[lo]) / (temps[hi] - temps[lo]);
   return values[lo] + frac * (values[hi] - values[lo]);
 }
+
+// Slope of the piecewise-linear table at T: the exact derivative of
+// interpolateTabulated, so an implicit source linearized with it agrees
+// with the value lookup inside each table bin (e.g. the NbTi resistivity
+// step at Tc, which the log-spaced table ramps over a single bin).
+export function interpolateTabulatedSlope(
+  T: number,
+  temps: number[],
+  values: number[],
+): number {
+  const n = temps.length;
+  if (T <= temps[0] || T >= temps[n - 1]) return 0;
+  let lo = 0,
+    hi = n - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (temps[mid] <= T) lo = mid;
+    else hi = mid;
+  }
+  return (values[hi] - values[lo]) / (temps[hi] - temps[lo]);
+}

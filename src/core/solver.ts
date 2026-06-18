@@ -2,7 +2,7 @@
 // Complete Crank-Nicolson Multi-Wire Thermal Solver with Three-State Boundaries
 
 import type { SolverConfig, Plate, PlateType, MaterialType, NodeState, WireConfig, StepResult } from '../types';
-import { interpolateTabulated, COPPER, NBTI, type MaterialTable } from '../constants/materials';
+import { interpolateTabulated, interpolateTabulatedSlope, COPPER, NBTI, type MaterialTable } from '../constants/materials';
 
 /* ===================================================================
    FRIDGE COOLING CURVE
@@ -21,6 +21,13 @@ function fridgeCoolingDerivative(T: number, coolingCapacityWatts: number): numbe
 }
 
 /* ===================================================================
+   Lumped joint thermal mass fallback for resistor plates that do not
+   specify heatCapacityJK. A wire cell alone holds only ~nJ/K, so a
+   physical joint mass is required for finite heating rates.
+   =================================================================== */
+const DEFAULT_RESISTOR_HEAT_CAPACITY_JK = 0.01;
+
+/* ===================================================================
    PlateState - Runtime state for dynamic/resistor plates
    =================================================================== */
 interface PlateRuntime {
@@ -35,12 +42,29 @@ interface PlateRuntime {
 export class WireSolverState {
   readonly wireId: number;
   readonly N: number;
+  // Number of identical parallel strands represented by this wire entry.
+  // The bundle is solved as one effective channel: with every strand at
+  // the same temperature, the volumetric heat equation is identical for
+  // each strand, so only extensive quantities (area, fluxes, lumped
+  // joint mass/resistance) need scaling.
+  readonly wireCount: number;
+  // Per-strand cross-sectional area (m^2)
+  readonly areaPerWire: number;
+  // Effective conduction/mass area of the bundle: wireCount * areaPerWire
   readonly area: number;
+  // TOTAL current through the bundle; strands share it equally
   currentAmps: number;
+  // Number of wire entries in the whole system: a bias-driven resistor
+  // plate is one physical object shared by every wire crossing its node,
+  // so its power is split evenly across them.
+  readonly totalWires: number;
   temperatures: Float64Array;
   k: Float64Array;
   cp: Float64Array;
   rhoE: Float64Array;
+  // d(rhoE)/dT of the tabulated lookup, used to linearize the Joule
+  // source implicitly (see crankNicolsonStep).
+  drhoEdT: Float64Array;
   rho: Float64Array;
   materialType: MaterialType[];
   plateTypeAtNode: (PlateType | null)[];
@@ -56,16 +80,20 @@ export class WireSolverState {
   private cprime: Float64Array;
   private dprime: Float64Array;
 
-  constructor(wireConfig: WireConfig, N: number, plates: Plate[]) {
+  constructor(wireConfig: WireConfig, N: number, plates: Plate[], totalWires: number = 1) {
     this.wireId = wireConfig.id;
     this.N = N;
-    this.area = wireConfig.crossSectionalArea;
+    this.totalWires = Math.max(1, totalWires);
+    this.wireCount = Math.max(1, Math.round(wireConfig.wireCount ?? 1));
+    this.areaPerWire = wireConfig.crossSectionalArea;
+    this.area = this.wireCount * this.areaPerWire;
     this.currentAmps = wireConfig.currentAmps;
 
     this.temperatures = new Float64Array(N);
     this.k = new Float64Array(N);
     this.cp = new Float64Array(N);
     this.rhoE = new Float64Array(N);
+    this.drhoEdT = new Float64Array(N);
     this.rho = new Float64Array(N);
     this.materialType = new Array<MaterialType>(N).fill('copper');
     this.isFixed = new Array<boolean>(N).fill(false);
@@ -125,22 +153,26 @@ export class WireSolverState {
       this.temperatures.fill(4.0);
       return;
     }
-    let cp = 0;
+    const first = sorted[0];
+    const last = sorted[sorted.length - 1];
+    let seg = 0;
     for (let i = 0; i < this.N; i++) {
-      if (cp + 1 < sorted.length && i > sorted[cp + 1].nodeIndex) cp++;
-      if (i === sorted[cp].nodeIndex) {
-        this.temperatures[i] = sorted[cp].temperature;
+      // Nodes outside the plate span clamp to the nearest plate temperature;
+      // extrapolating past the first plate can produce T < 0.
+      if (i <= first.nodeIndex) {
+        this.temperatures[i] = first.temperature;
         continue;
       }
-      if (cp + 1 >= sorted.length) {
-        this.temperatures[i] = sorted[cp].temperature;
+      if (i >= last.nodeIndex) {
+        this.temperatures[i] = last.temperature;
         continue;
       }
-      const n0 = sorted[cp].nodeIndex;
-      const n1 = sorted[cp + 1].nodeIndex;
-      const t0 = sorted[cp].temperature;
-      const t1 = sorted[cp + 1].temperature;
-      const frac = (i - n0) / (n1 - n0);
+      while (seg + 1 < sorted.length && sorted[seg + 1].nodeIndex < i) seg++;
+      const n0 = sorted[seg].nodeIndex;
+      const n1 = sorted[seg + 1].nodeIndex;
+      const t0 = sorted[seg].temperature;
+      const t1 = sorted[seg + 1].temperature;
+      const frac = n1 > n0 ? (i - n0) / (n1 - n0) : 1;
       this.temperatures[i] = t0 + frac * (t1 - t0);
     }
   }
@@ -152,6 +184,7 @@ export class WireSolverState {
       this.k[i] = Math.max(interpolateTabulated(T, mat.temperatures, mat.k), 1e-12);
       this.cp[i] = Math.max(interpolateTabulated(T, mat.temperatures, mat.cp), 1e-8);
       this.rhoE[i] = Math.max(interpolateTabulated(T, mat.temperatures, mat.rhoE), 0);
+      this.drhoEdT[i] = interpolateTabulatedSlope(T, mat.temperatures, mat.rhoE);
       this.rho[i] = mat.rho;
     }
   }
@@ -160,6 +193,16 @@ export class WireSolverState {
      CRANK-NICOLSON IMPLICIT STEP (Three-State Boundary Logic)
 
      PDE: rho*Cp * dT/dt = d/dx(k * dT/dx) + I^2*rhoE/A^2 + qExt
+
+     A is the EFFECTIVE area of the strand bundle (wireCount * A_wire)
+     and I is the TOTAL bundle current. For n identical parallel strands
+     each carrying I/n, the volumetric Joule density is
+       n * (I/n)^2 * rhoE / A_wire / (n * A_wire) = I^2 * rhoE / A^2,
+     i.e. exactly the single-channel form with the effective area, so the
+     tridiagonal coefficients keep their shape. The transient term
+     rho*Cp*dT/dt is intensive (same material in every strand); the
+     bundle's combined thermal mass rho*Cp*A*dx enters wherever lumped
+     (extensive) quantities are converted to volumetric ones.
 
      Crank-Nicolson (theta=0.5):
        gamma = rho_i*Cp_i / dt
@@ -177,8 +220,18 @@ export class WireSolverState {
 
      Boundary Modes:
        'fixed'    -> diag=1, lower=upper=0, rhs=T_fixed (Dirichlet)
-       'dynamic'  -> participates in CN system with cooling sink term
+       'dynamic'  -> Dirichlet at the plate's current temperature; the
+                     plate itself is integrated by the lumped ODE in
+                     ThermalSolver.updateDynamicPlates (its heat capacity
+                     is orders of magnitude above a wire cell's, so it is
+                     effectively constant during one wire solve)
        'resistor' -> participates in CN system with Joule source injection
+                     and the joint's lumped heat capacity added to the
+                     node's thermal inertia; if coolingCapacityWatts is
+                     set, the joint is heat-sunk to the fridge via a
+                     linearized tanh cooling curve (it models a load
+                     mounted on a cooled stage rather than a joint
+                     floating on the wire end)
        Node 0 (no plate): Neumann (insulated) via ghost-node symmetry
      =========================================================== */
   crankNicolsonStep(dt: number, dx: number, qExt: number): void {
@@ -189,63 +242,80 @@ export class WireSolverState {
     const A2 = A * A;
 
     for (let i = 0; i < N; i++) {
-      // -------- FIXED (Dirichlet) BOUNDARY --------
-      if (this.isFixed[i]) {
+      const plateConfig = this.plateConfigAtNode[i];
+      const plateType = this.plateTypeAtNode[i];
+
+      // -------- FIXED & DYNAMIC (Dirichlet) BOUNDARIES --------
+      if (this.isFixed[i] || plateType === 'dynamic') {
         this.lower[i] = 0;
         this.diag[i] = 1;
         this.upper[i] = 0;
-        this.rhs[i] = this.fixedTemps[i];
+        this.rhs[i] = this.isFixed[i] ? this.fixedTemps[i] : this.temperatures[i];
         continue;
       }
 
       // Compute gamma (temporal inertia coefficient)
-      const gamma = this.rho[i] * this.cp[i] / dt;
+      let gamma = this.rho[i] * this.cp[i] / dt;
 
       // Base volumetric source: Joule heating + external power
       let source = current * current * this.rhoE[i] / A2 + qExt;
 
-      // -------- RESISTOR BOUNDARY NODE --------
-      // Inject lumped Joule heating Q = I^2 * R into the volumetric source
-      // Converted to W/m^3 by dividing by cell volume (A * dx)
-      const plateConfig = this.plateConfigAtNode[i];
-      const plateType = this.plateTypeAtNode[i];
-
-      if (plateType === 'resistor' && plateConfig && plateConfig.resistanceOhms) {
-        const qResistor = current * current * plateConfig.resistanceOhms / (A * dx);
-        source += qResistor;
+      // -------- SOURCE-JACOBIAN STABILIZATION --------
+      // The Joule source q(T) = I^2 * rhoE(T) / A^2 is lagged at T^n, so
+      // wherever d(rhoE)/dT > 0 (copper above ~20 K, the NbTi step at Tc)
+      // the explicit source is positive feedback: each solve overshoots
+      // the physical growth rate and the runaway is numerical as well as
+      // physical. Following the C++ reference (cpp_sim a7d2951), add the
+      // clamped source Jacobian J = I^2 * (drhoE/dT) / A^2 to the row.
+      // Folding J into gamma puts +J on the diagonal and +J*T^n on the
+      // RHS (every row uses gamma symmetrically), which damps the update
+      // toward the linearized source rate, keeps the matrix strictly
+      // diagonally dominant, and vanishes identically at steady state.
+      const gamma0 = gamma;
+      if (current !== 0 && this.drhoEdT[i] > 0) {
+        const jq = current * current * this.drhoEdT[i] / A2;
+        gamma += Math.min(jq, 1e3 * gamma0);
       }
 
-      // -------- DYNAMIC COOLING PLATE --------
-      // Linearized implicit cooling: adds damping to diagonal and base load to RHS
-      // Q_fridge(T) ~ Q_fridge(T_n) + dQ/dT|_n * (T^{n+1} - T_n)
-      // This creates additional diagonal stiffness and RHS correction
-      let dynamicDiagExtra = 0;
-      let dynamicRhsExtra = 0;
+      // -------- RESISTOR BOUNDARY NODE --------
+      // Each of the n strands has its own joint of resistance R carrying
+      // I/n, so the bundle dissipates n * (I/n)^2 * R = I^2 * R / n
+      // (joints in parallel). The total is converted to W/m^3 over the
+      // combined cell volume A * dx. The n joints' lumped heat capacities
+      // are added to the node's thermal inertia: without joint mass, all
+      // of Q lands on the wire cells' ~nJ/K capacity and the first step
+      // overshoots by tens of kelvin at any nonzero current.
+      if (plateType === 'resistor' && plateConfig) {
+        const R = plateConfig.resistanceOhms || 0;
+        if (plateConfig.currentAmps !== undefined) {
+          // Bias mode: the resistor is its own circuit (heater/sample/
+          // SC load) carrying plateConfig.currentAmps, NOT the wire's
+          // lead current. One physical element: P = I_bias^2 * R, split
+          // evenly across the wires terminating at this node.
+          const biasI = plateConfig.currentAmps;
+          source += biasI * biasI * R / this.totalWires / (A * dx);
+        } else {
+          // Joint mode: the resistor sits in the wire's circuit and
+          // carries the bundle current (per-strand joints in parallel).
+          source += current * current * (R / this.wireCount) / (A * dx);
+        }
 
-      if (plateType === 'dynamic' && plateConfig) {
+        const Cjoint = plateConfig.heatCapacityJK || DEFAULT_RESISTOR_HEAT_CAPACITY_JK;
+        gamma += this.wireCount * Cjoint / (A * dx * dt);
+
+        // A resistor joint mounted on a cooled stage (e.g. the 1-Ohm load
+        // bolted to the mixing chamber) sinks heat to the fridge. Without
+        // this term the joint hangs off the wire end thermally isolated:
+        // even microwatts then ride the wire's ~1e-10 W/K conductance to
+        // thousands of kelvin. Backward-Euler linearization of the fridge
+        // curve (sink at T^n explicit, dQ/dT implicit via gamma) matches
+        // the dynamic-plate treatment and cannot undershoot equilibrium.
         const Qcap = plateConfig.coolingCapacityWatts || 0;
-        const Cplate = plateConfig.heatCapacityJK || 1.0;
-        const Tn = this.temperatures[i];
-
-        // Fridge cooling at current temperature
-        const Qfridge_n = fridgeCoolingPower(Tn, Qcap);
-        const dQfridge_dT = fridgeCoolingDerivative(Tn, Qcap);
-
-        // Convert cooling power to volumetric rate (W/m^3)
-        // The plate acts as a localized heat sink distributed over one cell volume
-        const cellVolume = A * dx;
-        const coolingVolumetric = Qfridge_n / cellVolume;
-        const coolingDerivVolumetric = dQfridge_dT / cellVolume;
-
-        // Linearized implicit treatment:
-        // Cooling term in equation: -Q_fridge(T^{n+1}) / (A*dx)
-        //   ~ -(Qfridge_n + dQfridge_dT * (T^{n+1} - Tn)) / cellVolume
-        // Move the T^{n+1} part to LHS (adds to diagonal)
-        // Keep the constant part on RHS
-        dynamicDiagExtra = 0.5 * coolingDerivVolumetric;
-        dynamicRhsExtra = -coolingVolumetric + coolingDerivVolumetric * Tn;
-        // The 0.5 factor on diagonal is the CN temporal centering
-        // Net effect: stabilizes the cooling sink implicitly
+        if (Qcap > 0) {
+          const vol = A * dx;
+          source -= fridgeCoolingPower(this.temperatures[i], Qcap) / vol;
+          gamma += fridgeCoolingDerivative(this.temperatures[i], Qcap) / vol;
+        }
       }
 
       // -------- CONSTRUCT MATRIX ROW --------
@@ -257,11 +327,11 @@ export class WireSolverState {
         const betaEff = 2.0 * kHalf / dx2;
 
         this.lower[i] = 0;
-        this.diag[i] = gamma + 0.5 * betaEff + dynamicDiagExtra;
+        this.diag[i] = gamma + 0.5 * betaEff;
         this.upper[i] = -0.5 * betaEff;
         this.rhs[i] = (gamma - 0.5 * betaEff) * this.temperatures[0]
                     + 0.5 * betaEff * this.temperatures[1]
-                    + source + dynamicRhsExtra;
+                    + source;
       } else if (i === N - 1) {
         // Last node that isn't fixed - Neumann on the right side
         const kHalf = (this.k[N - 2] + this.k[N - 1] > 0)
@@ -270,11 +340,11 @@ export class WireSolverState {
         const alphaEff = 2.0 * kHalf / dx2;
 
         this.lower[i] = -0.5 * alphaEff;
-        this.diag[i] = gamma + 0.5 * alphaEff + dynamicDiagExtra;
+        this.diag[i] = gamma + 0.5 * alphaEff;
         this.upper[i] = 0;
         this.rhs[i] = 0.5 * alphaEff * this.temperatures[N - 2]
                     + (gamma - 0.5 * alphaEff) * this.temperatures[N - 1]
-                    + source + dynamicRhsExtra;
+                    + source;
       } else {
         // Interior nodes (1 <= i <= N-2)
         const kL = (this.k[i - 1] + this.k[i] > 0)
@@ -288,12 +358,12 @@ export class WireSolverState {
         const beta = kR / dx2;
 
         this.lower[i] = -0.5 * alpha;
-        this.diag[i] = gamma + 0.5 * (alpha + beta) + dynamicDiagExtra;
+        this.diag[i] = gamma + 0.5 * (alpha + beta);
         this.upper[i] = -0.5 * beta;
         this.rhs[i] = 0.5 * alpha * this.temperatures[i - 1]
                     + (gamma - 0.5 * (alpha + beta)) * this.temperatures[i]
                     + 0.5 * beta * this.temperatures[i + 1]
-                    + source + dynamicRhsExtra;
+                    + source;
       }
     }
 
@@ -340,6 +410,9 @@ export class WireSolverState {
   /* ===========================================================
      Compute conductive heat flux at a specific node index
      Q = A * k * dT/dx (using central/one-sided differences)
+     A is the bundle's effective area, so the returned load includes
+     the contribution of every parallel strand (e.g. zero-current
+     conduction heat leak scales linearly with wireCount).
      Returns positive value = heat flowing INTO the node
      =========================================================== */
   computeHeatFluxAtNode(nodeIdx: number, dx: number): number {
@@ -396,9 +469,12 @@ export class ThermalSolver {
   // Adaptive dt state
   private lastMaxDeltaT: number = 0;
   private dtReductionActive: boolean = false;
-  private static readonly MAX_DELTA_T_THRESHOLD = 50.0;
-  private static readonly DT_REDUCTION_FACTOR = 0.25;
-  private static readonly MAX_SUBSTEPS = 5;
+  // Maximum temperature change allowed per SUBSTEP. Large enough for
+  // ordinary transients, small enough to catch NbTi Tc crossings and
+  // Joule-runaway feedback before they overshoot.
+  private static readonly MAX_DELTA_T_THRESHOLD = 5.0;
+  private static readonly SUBSTEP_GROWTH = 4;
+  private static readonly MAX_DT_REDUCTIONS = 5;
 
   constructor(config: SolverConfig, plates: Plate[], wireConfigs: WireConfig[]) {
     this.N = Math.max(3, config.numNodes);
@@ -414,7 +490,7 @@ export class ThermalSolver {
     }));
 
     for (const wc of wireConfigs) {
-      const ws = new WireSolverState(wc, this.N, plates);
+      const ws = new WireSolverState(wc, this.N, plates, wireConfigs.length);
       this.wires.push(ws);
       this.wireMap.set(wc.id, ws);
     }
@@ -434,35 +510,37 @@ export class ThermalSolver {
       try { qExt = powerFn(t); } catch { qExt = 0; }
     }
 
-    // Store previous temperatures for delta check
+    // Snapshot full state (wire grids + plate temperatures) so failed
+    // attempts can be rolled back cleanly.
     const prevTemps: Float64Array[] = this.wires.map(
       (w) => new Float64Array(w.temperatures)
     );
+    const prevPlateTemps = this.plateRuntimes.map((pr) => pr.currentTemperature);
+
+    // Scratch buffers for per-substep delta measurement
+    const scratch: Float64Array[] = this.wires.map(
+      (w) => new Float64Array(w.N)
+    );
 
     // Adaptive substep logic
-    let actualDt = dt;
     let substeps = 1;
     let dtWasReduced = false;
+    let converged = false;
+    let maxDelta = 0;
 
-    // Attempt the step, potentially with reduced dt
-    for (let attempt = 0; attempt < ThermalSolver.MAX_SUBSTEPS; attempt++) {
-      const subDt = dt / substeps;
-
-      // Reset temperatures to start of this attempt
+    for (let attempt = 0; attempt <= ThermalSolver.MAX_DT_REDUCTIONS; attempt++) {
+      // Reset state to start of step for this attempt
       if (attempt > 0) {
         for (let w = 0; w < this.wires.length; w++) {
           this.wires[w].temperatures.set(prevTemps[w]);
         }
-        // Reset dynamic plate temperatures
-        for (const pr of this.plateRuntimes) {
-          if (pr.plate.plateType === 'dynamic') {
-            const nodeIdx = Math.max(0, Math.min(pr.plate.nodeIndex, this.N - 1));
-            pr.currentTemperature = prevTemps[0][nodeIdx];
-          }
+        for (let p = 0; p < this.plateRuntimes.length; p++) {
+          this.plateRuntimes[p].currentTemperature = prevPlateTemps[p];
         }
       }
 
-      let maxDelta = 0;
+      const subDt = dt / substeps;
+      maxDelta = 0;
 
       for (let sub = 0; sub < substeps; sub++) {
         // Update material properties based on current temperatures
@@ -470,8 +548,13 @@ export class ThermalSolver {
           wire.updateMaterialProperties();
         }
 
-        // Synchronize dynamic plate temperatures across wires BEFORE solve
+        // Write plate temperatures into all wires BEFORE solve
         this.syncDynamicPlateTemperatures();
+
+        // Snapshot the substep start state for the stability check
+        for (let w = 0; w < this.wires.length; w++) {
+          scratch[w].set(this.wires[w].temperatures);
+        }
 
         // Solve each wire independently with current plate states
         for (const wire of this.wires) {
@@ -481,10 +564,13 @@ export class ThermalSolver {
         // Update dynamic plate temperatures based on net heat flow from ALL wires
         this.updateDynamicPlates(subDt);
 
-        // Compute maximum delta T across entire grid
+        // Maximum temperature change across this SUBSTEP. Measuring per
+        // substep (not per full step) means refinement actually reduces
+        // the metric for resolvable transients, while genuine runaways
+        // keep failing and surface as an error below.
         for (let w = 0; w < this.wires.length; w++) {
           for (let i = 0; i < this.N; i++) {
-            const delta = Math.abs(this.wires[w].temperatures[i] - prevTemps[w][i]);
+            const delta = Math.abs(this.wires[w].temperatures[i] - scratch[w][i]);
             if (delta > maxDelta) maxDelta = delta;
           }
         }
@@ -492,22 +578,28 @@ export class ThermalSolver {
 
       this.lastMaxDeltaT = maxDelta;
 
-      // Check convergence safety
-      if (maxDelta > ThermalSolver.MAX_DELTA_T_THRESHOLD) {
-        substeps *= 4;
-        dtWasReduced = true;
-        if (substeps > Math.pow(4, ThermalSolver.MAX_SUBSTEPS)) {
-          // Cannot converge even with maximum reduction
-          this.dtReductionActive = true;
-          actualDt = dt / substeps;
-          break;
-        }
-        continue;
-      } else {
-        actualDt = dt / substeps;
-        this.dtReductionActive = substeps > 1;
+      if (maxDelta <= ThermalSolver.MAX_DELTA_T_THRESHOLD) {
+        converged = true;
         break;
       }
+      substeps *= ThermalSolver.SUBSTEP_GROWTH;
+      dtWasReduced = true;
+    }
+
+    this.dtReductionActive = substeps > 1;
+
+    if (!converged) {
+      // Roll back instead of accepting a diverged state
+      for (let w = 0; w < this.wires.length; w++) {
+        this.wires[w].temperatures.set(prevTemps[w]);
+      }
+      for (let p = 0; p < this.plateRuntimes.length; p++) {
+        this.plateRuntimes[p].currentTemperature = prevPlateTemps[p];
+      }
+      throw new Error(
+        `Solver cannot stabilize: ΔT=${maxDelta.toFixed(2)}K per substep at dt/${substeps / ThermalSolver.SUBSTEP_GROWTH}. ` +
+        `Reduce dt or check wire/plate configuration for thermal runaway.`
+      );
     }
 
     // Validate final state
@@ -521,7 +613,9 @@ export class ThermalSolver {
 
     return {
       maxDeltaT: this.lastMaxDeltaT,
-      actualDt,
+      // The full interval is always integrated (substeps * subDt = dt),
+      // so callers must advance their clocks by dt, not dt/substeps.
+      actualDt: dt,
       dtWasReduced,
       plateTemperatures: plateTemps,
     };
@@ -529,13 +623,36 @@ export class ThermalSolver {
 
   /* ===========================================================
      DYNAMIC PLATE UPDATE
-     After all wires have been solved for a sub-step,
-     compute net heat flow into each dynamic plate from all wires,
-     then update the plate temperature:
-     dT_plate = (Q_wires - Q_fridge(T_plate)) * dt / C_plate
+     After all wires have been solved for a sub-step, compute the net
+     conductive heat flow into each dynamic plate from all wires and
+     integrate the lumped plate ODE:
+
+       C_plate * dT/dt = Q_wires - Q_fridge(T)
+
+     The fridge term is treated with a linearized backward-Euler step
+     (Q evaluated at T^{n+1} to first order), which is unconditionally
+     stable and cannot overshoot through the equilibrium into T < 0:
+
+       dT = dt * (Q_wires - Q_fridge(T_n)) / (C_plate + dt * dQ/dT)
+
+     The updated plate temperature is written back to every wire so the
+     next solve sees the shared junction state (inter-wire coupling).
+     This is the ONLY place fridge cooling is applied; the wire matrix
+     treats the plate node as Dirichlet.
      =========================================================== */
   private updateDynamicPlates(dt: number): void {
     for (const pr of this.plateRuntimes) {
+      // Resistor plates have no state of their own; report the hottest
+      // wire temperature at the joint so telemetry reflects reality.
+      if (pr.plate.plateType === 'resistor') {
+        const nodeIdx = Math.max(0, Math.min(pr.plate.nodeIndex, this.N - 1));
+        let maxT = -Infinity;
+        for (const wire of this.wires) {
+          if (wire.temperatures[nodeIdx] > maxT) maxT = wire.temperatures[nodeIdx];
+        }
+        if (maxT > -Infinity) pr.currentTemperature = maxT;
+        continue;
+      }
       if (pr.plate.plateType !== 'dynamic') continue;
 
       const nodeIdx = Math.max(0, Math.min(pr.plate.nodeIndex, this.N - 1));
@@ -548,51 +665,35 @@ export class ThermalSolver {
         totalQwires += wire.computeHeatFluxAtNode(nodeIdx, this.dx);
       }
 
-      // Fridge cooling power at current plate temperature
       const Qfridge = fridgeCoolingPower(pr.currentTemperature, Qcap);
+      const dQdT = fridgeCoolingDerivative(pr.currentTemperature, Qcap);
 
-      // Temperature update
-      const deltaT = (totalQwires - Qfridge) * dt / Cplate;
+      const deltaT = dt * (totalQwires - Qfridge) / (Cplate + dt * dQdT);
       pr.currentTemperature += deltaT;
 
       // Enforce physical minimum (cannot go below 1 mK)
       if (pr.currentTemperature < 0.001) {
         pr.currentTemperature = 0.001;
       }
+
+      // Propagate the new junction temperature to all wires
+      for (const wire of this.wires) {
+        wire.temperatures[nodeIdx] = pr.currentTemperature;
+      }
     }
   }
 
   /* ===========================================================
      SYNC DYNAMIC PLATE TEMPERATURES
-     Propagates updated plate temperatures back to all wire nodes
-     so the next solve step uses the coupled state.
-     This implements inter-wire coupling via shared plate nodes.
+     Writes each dynamic plate's temperature into all wire grids at the
+     plate node, ensuring the wire solves (which clamp these nodes as
+     Dirichlet) see a consistent shared junction state.
      =========================================================== */
   private syncDynamicPlateTemperatures(): void {
     for (const pr of this.plateRuntimes) {
       if (pr.plate.plateType !== 'dynamic') continue;
 
       const nodeIdx = Math.max(0, Math.min(pr.plate.nodeIndex, this.N - 1));
-
-      // Average the wire temperatures at this node to determine plate temperature
-      let avgTemp = 0;
-      let count = 0;
-      for (const wire of this.wires) {
-        avgTemp += wire.temperatures[nodeIdx];
-        count++;
-      }
-
-      if (count > 0) {
-        // Blend: plate tracks the average wire temperature at the junction
-        // but weighted by its thermal inertia
-        const wireAvg = avgTemp / count;
-        const Cplate = pr.plate.heatCapacityJK || 1.0;
-        // Use a relaxation: heavier plates are slower to respond
-        const relaxation = Math.min(1.0, 1.0 / (1.0 + Cplate * 0.01));
-        pr.currentTemperature = pr.currentTemperature * (1 - relaxation) + wireAvg * relaxation;
-      }
-
-      // Write plate temperature back to all wires at this node
       for (const wire of this.wires) {
         wire.temperatures[nodeIdx] = pr.currentTemperature;
       }

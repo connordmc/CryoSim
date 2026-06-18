@@ -33,6 +33,9 @@ const SystemMap: React.FC<Props> = ({ wires, plates, numNodes, hoveredNode, sele
             <div className="absolute top-0.5 left-1 text-[8px] text-gray-500 z-10 flex items-center gap-1">
               <span className="w-2 h-2 rounded-full inline-block" style={{ backgroundColor: wire.color }} />
               {wire.label}
+              {(wire.wireCount ?? 1) > 1 && (
+                <span className="text-cyan-500/70">[{wire.wireCount}x parallel]</span>
+              )}
             </div>
 
             {/* Material segments */}
@@ -60,7 +63,7 @@ const SystemMap: React.FC<Props> = ({ wires, plates, numNodes, hoveredNode, sele
                 style={{ left: `${(p.nodeIndex / N) * 100}%`, transform: 'translateX(-50%)' }}
               >
                 <div
-                  className={`w-1 flex-1 rounded-sm ${p.isFixed ? 'bg-amber-400' : 'border border-amber-400 bg-transparent'}`}
+                  className={`w-1 flex-1 rounded-sm ${p.plateType === 'fixed' ? 'bg-amber-400' : 'border border-amber-400 bg-transparent'}`}
                 />
                 <span className="text-[6px] text-amber-400/80 leading-none mt-px">{p.temperature.toFixed(0)}K</span>
               </div>
